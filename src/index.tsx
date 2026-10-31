@@ -60,6 +60,7 @@ const stopAndTranscribe = callable<[], { ok: boolean; text?: string; error?: str
 interface UpdateInfo { ok: boolean; installed: string; latest?: string; available?: boolean; error?: string }
 const checkUpdate = callable<[], UpdateInfo>("check_update");
 const installUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("install_update");
+const logBackend = callable<[string], boolean>("log");
 const setClipboard = callable<[string], { ok: boolean; method: string }>("set_clipboard");
 
 // ---------- module state (works with the panel closed) ----------
@@ -99,8 +100,15 @@ function runningAppName(): string {
 // ---------- key output ----------
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Which input features this Steam build actually provides (filled at load).
+const feeds = { state: false, messages: false, pad: false, keys: false, names: "" };
+
 async function tapKeys(mods: number[], code: number) {
-  const input = SteamClient.Input;
+  const input = SteamClient?.Input;
+  if (typeof input?.ControllerKeyboardSetKeyState !== "function") {
+    toaster.toast({ title: "Ubermoc Speech", body: "This Steam build cannot send key presses" });
+    return;
+  }
   for (const m of mods) input.ControllerKeyboardSetKeyState(m, true);
   input.ControllerKeyboardSetKeyState(code, true);
   await sleep(40);
@@ -456,7 +464,10 @@ function Panel() {
         <PanelSectionRow>
           <ToggleField
             label="Live input"
-            description={monitor ?? "Shows buttons the plugin detects (for troubleshooting)"}
+            description={
+              monitor ??
+              `Listening feeds - Steam state: ${feeds.state ? "yes" : "NO"}, Steam buttons: ${feeds.messages ? "yes" : "NO"}, gamepad: ${feeds.pad ? "yes" : "NO"}, key output: ${feeds.keys ? "yes" : "NO"}`
+            }
             checked={monitor !== null}
             onChange={(on) => setMonitor(on ? "waiting for input..." : null)}
           />
@@ -649,8 +660,30 @@ export default definePlugin(() => {
   void getSettings().then((s) => {
     current = s;
   });
-  const regState = SteamClient.Input.RegisterForControllerStateChanges(onControllerState);
-  const regMsg = SteamClient.Input.RegisterForControllerInputMessages?.(onInputMessage);
+  // Steam builds differ: only call input functions that actually exist, and
+  // never let a missing one stop the plugin from loading.
+  const input = (typeof SteamClient !== "undefined" && SteamClient?.Input) || {};
+  const names: string[] = [];
+  // eslint-disable-next-line guard-for-in
+  for (const k in input) if (/Controller|Register|Key/i.test(k)) names.push(k);
+  feeds.names = names.join(",");
+  void logBackend(`SteamClient.Input functions: ${feeds.names || "(none)"}`);
+
+  const tryRegister = (fn: string, cb: unknown) => {
+    try {
+      if (typeof input[fn] !== "function") return null;
+      return input[fn](cb);
+    } catch (e) {
+      void logBackend(`${fn} failed: ${e}`);
+      return null;
+    }
+  };
+  const regState = tryRegister("RegisterForControllerStateChanges", onControllerState);
+  const regMsg = tryRegister("RegisterForControllerInputMessages", onInputMessage);
+  feeds.state = typeof input.RegisterForControllerStateChanges === "function" && regState !== null;
+  feeds.messages = typeof input.RegisterForControllerInputMessages === "function" && regMsg !== null;
+  feeds.pad = typeof navigator.getGamepads === "function";
+  feeds.keys = typeof input.ControllerKeyboardSetKeyState === "function";
   const padTimer = setInterval(pollGamepads, 30);
 
   return {
