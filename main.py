@@ -22,7 +22,7 @@ import decky  # provided by Decky Loader
 HOST = "127.0.0.1"
 PORT = 8178
 REPO = "ubermoc/Ubermoc-Speech"
-RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/tags/latest"
+RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 # name -> (approx size in MB, description). The file is ggml-<name>.bin.
 MODELS = {
