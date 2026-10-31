@@ -35,7 +35,7 @@ DEFAULT_SETTINGS = {
     "threads": 4,
     "autostart": True,
     # Combo is stored as raw controller bitmasks so any button set can be recorded.
-    "combo": {"lower": 0x10000, "upper": 0x400},  # R5 + R4 (see src/buttons.ts)
+    "combo": {"lower": 0x10000, "upper": 0x400, "ids": []},  # R5 + R4 (see src/buttons.ts)
     "before_key": {"mode": "enter", "code": 40},   # none | enter | custom
     "after_key": {"mode": "enter", "code": 40},
     "profiles": {},  # appid -> partial settings overriding the globals
@@ -65,23 +65,91 @@ class Plugin:
     # ---------- lifecycle ----------
     async def _main(self):
         os.makedirs(self._models_dir(), exist_ok=True)
+        self._migrate_old_models()
         self.settings = self._load_settings()
+        self.want_running = False
         decky.logger.info("Ubermoc Speech loaded")
         if self.settings.get("autostart"):
-            model = self._model_path(self.settings["model"])
-            if os.path.exists(model):
-                await Plugin.start_server(self)
+            await Plugin.start_server(self)
+        self.watchdog_task = asyncio.get_event_loop().create_task(Plugin._watchdog(self))
 
     async def _unload(self):
+        task = getattr(self, "watchdog_task", None)
+        if task:
+            task.cancel()
+        self.want_running = False
         await Plugin.stop_server(self)
         self._stop_recorder()
 
+    async def _watchdog(self):
+        """Restart the whisper server if it dies while it is supposed to run."""
+        failures = 0
+        while True:
+            await asyncio.sleep(10)
+            if not self.want_running:
+                failures = 0
+                continue
+            if self.server_proc and self.server_proc.poll() is None:
+                failures = 0
+                continue
+            failures += 1
+            if failures > 5:
+                decky.logger.error("whisper-server keeps crashing; watchdog giving up")
+                self.want_running = False
+                continue
+            decky.logger.warning(f"whisper-server died; restarting (attempt {failures})")
+            await asyncio.sleep(2 ** failures)
+            await Plugin.start_server(self)
+
     # ---------- paths / settings ----------
     def _models_dir(self) -> str:
-        return os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "models")
+        # Deliberately NOT inside the plugin or Decky runtime dirs: those can be
+        # wiped when the plugin is updated, reinstalled or uninstalled. A folder
+        # in the user's home survives all of that, so a model is downloaded once.
+        home = getattr(decky, "DECKY_USER_HOME", "/home/deck")
+        return os.path.join(home, ".local", "share", "ubermoc-speech", "models")
+
+    def _migrate_old_models(self):
+        """Move models saved by earlier versions into the durable folder."""
+        old = os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "models")
+        if not os.path.isdir(old):
+            return
+        for fname in os.listdir(old):
+            if fname.endswith(".bin"):
+                dst = os.path.join(self._models_dir(), fname)
+                if not os.path.exists(dst):
+                    try:
+                        shutil.move(os.path.join(old, fname), dst)
+                    except OSError as e:
+                        decky.logger.error(f"model migration failed: {e}")
+
+    def _manifest_file(self) -> str:
+        return os.path.join(self._models_dir(), "manifest.json")
+
+    def _manifest(self) -> dict:
+        try:
+            with open(self._manifest_file()) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    def _model_ok(self, name: str) -> bool:
+        """A model counts as installed only if it is complete."""
+        path = self._model_path(name)
+        if not os.path.exists(path):
+            return False
+        size = os.path.getsize(path)
+        expected = self._manifest().get(name)
+        if expected:
+            return size == expected
+        return size > MODELS.get(name, 0) * 1024 * 1024 * 0.9
 
     def _model_path(self, name: str) -> str:
         return os.path.join(self._models_dir(), f"ggml-{name}.bin")
+
+    async def log(self, message: str) -> bool:
+        decky.logger.info(f"[ui] {message}")
+        return True
 
     def _settings_file(self) -> str:
         return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
@@ -112,7 +180,7 @@ class Plugin:
             {
                 "name": name,
                 "size_mb": size,
-                "installed": os.path.exists(self._model_path(name)),
+                "installed": self._model_ok(name),
             }
             for name, size in MODELS.items()
         ]
@@ -120,29 +188,47 @@ class Plugin:
     async def download_model(self, name: str) -> dict:
         if name not in MODELS:
             return {"ok": False, "error": "unknown model"}
+        if self._model_ok(name):
+            return {"ok": True}  # never re-download a good model
         dest = self._model_path(name)
         tmp = dest + ".part"
         url = f"{MODEL_BASE_URL}/ggml-{name}.bin"
         self.download_progress[name] = 0.0
 
         def work():
-            req = urllib.request.Request(url, headers={"User-Agent": "ubermoc-speech"})
-            with urllib.request.urlopen(req, context=_ssl_context(), timeout=60) as r, open(tmp, "wb") as out:
-                total = int(r.headers.get("Content-Length") or 0)
-                done = 0
-                while chunk := r.read(1 << 20):
-                    out.write(chunk)
-                    done += len(chunk)
-                    if total:
-                        self.download_progress[name] = done / total
+            # A broken/partial final file is replaced; a .part file is resumed.
+            if os.path.exists(dest):
+                os.remove(dest)
+            have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+            headers = {"User-Agent": "ubermoc-speech"}
+            if have:
+                headers["Range"] = f"bytes={have}-"
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, context=_ssl_context(), timeout=60) as r:
+                resumed = r.status == 206
+                if have and not resumed:
+                    have = 0  # server ignored Range; start over
+                total = have + int(r.headers.get("Content-Length") or 0)
+                done = have
+                with open(tmp, "ab" if resumed else "wb") as out:
+                    while chunk := r.read(1 << 20):
+                        out.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            self.download_progress[name] = done / total
+            if total and os.path.getsize(tmp) != total:
+                raise IOError("download incomplete; tap download again to resume")
             os.replace(tmp, dest)
+            manifest = self._manifest()
+            manifest[name] = os.path.getsize(dest)
+            with open(self._manifest_file(), "w") as f:
+                json.dump(manifest, f)
 
         try:
             await asyncio.get_event_loop().run_in_executor(None, work)
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"download failed: {e}")
-            if os.path.exists(tmp):
-                os.remove(tmp)
+            # keep the .part file so the next attempt resumes
             self.download_progress.pop(name, None)
             return {"ok": False, "error": str(e)}
         self.download_progress.pop(name, None)
@@ -166,7 +252,7 @@ class Plugin:
         if self.server_proc and self.server_proc.poll() is None:
             return {"ok": True, "running": True}
         model = self._model_path(self.settings["model"])
-        if not os.path.exists(model):
+        if not self._model_ok(self.settings["model"]):
             return {"ok": False, "error": "model not installed"}
         binary = self._server_binary()
         if not os.path.exists(binary):
@@ -177,9 +263,11 @@ class Plugin:
                "-t", str(self.settings.get("threads", 4))]
         log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "whisper-server.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
+        self.want_running = True
         return {"ok": True, "running": True}
 
     async def stop_server(self) -> dict:
+        self.want_running = False
         proc = self.server_proc
         if proc and proc.poll() is None:
             proc.terminate()

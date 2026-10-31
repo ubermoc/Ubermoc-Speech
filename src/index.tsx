@@ -12,7 +12,7 @@ import {
 } from "@decky/ui";
 import { useEffect, useState } from "react";
 import { FaMicrophone } from "react-icons/fa";
-import { Combo, DEFAULT_COMBO, comboHeld } from "./buttons";
+import { Combo, DEFAULT_COMBO, comboEmpty, comboHeld, describeCombo } from "./buttons";
 import {
   KEY_CTRL,
   KEY_ENTER,
@@ -35,8 +35,10 @@ interface Settings {
   combo: Combo;
   before_key: KeySpec;
   after_key: KeySpec;
-  profiles: Record<string, Partial<Settings>>;
+  profiles: Record<string, Profile>;
 }
+interface Profile { name: string; before_key: KeySpec; after_key: KeySpec }
+interface LibApp { appid: string; name: string }
 interface ModelInfo { name: string; size_mb: number; installed: boolean }
 interface Status { running: boolean; recording: boolean; binary: boolean }
 
@@ -68,7 +70,26 @@ function runningAppId(): string {
 }
 
 function effective(s: Settings, appid: string): Settings {
-  return { ...s, ...(s.profiles?.[appid] ?? {}) };
+  const p = s.profiles?.[appid];
+  return p ? { ...s, before_key: p.before_key, after_key: p.after_key } : s;
+}
+
+function libraryApps(): LibApp[] {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const all = (window as any).appStore?.allApps ?? [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return all
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .filter((a: any) => a?.appid && a?.display_name)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    .map((a: any) => ({ appid: String(a.appid), name: String(a.display_name) }))
+    .sort((a: LibApp, b: LibApp) => a.name.localeCompare(b.name));
+}
+
+function runningAppName(): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const app = (Router as any).MainRunningApp;
+  return app?.display_name ? String(app.display_name) : "";
 }
 
 // ---------- key output ----------
@@ -130,24 +151,24 @@ async function onRelease() {
   await deliver(r.text, effective(current, runningAppId()));
 }
 
-// While set, the controller handler reports raw pressed masks to this callback
-// instead of acting on the combo (used by "Record combo").
-let captureCb: ((c: Combo) => void) | null = null;
+// ---------- input feeds ----------
+const heldIds = new Set<number>();
+let lastMask: Combo = { lower: 0, upper: 0 };
 
-function onControllerState(states: any[]) { // eslint-disable-line @typescript-eslint/no-explicit-any
-  if (!current) return;
-  const st = states?.[0];
-  if (!st) return;
-  const pressed: Combo = {
-    lower: Number(st.ulButtons ?? 0) >>> 0,
-    upper: Number(st.ulUpperButtons ?? 0) >>> 0,
-  };
+// While set, input is reported here instead of triggering dictation
+// (used by "Record combo").
+let captureCb: ((mask: Combo, ids: Set<number>) => void) | null = null;
+// Live monitor shown in the panel to help diagnose button detection.
+let monitorCb: ((text: string) => void) | null = null;
+
+function evaluate() {
   if (captureCb) {
-    captureCb(pressed);
+    captureCb(lastMask, heldIds);
     return;
   }
-  const combo = effective(current, runningAppId()).combo ?? DEFAULT_COMBO;
-  const down = comboHeld(pressed, combo);
+  if (!current) return;
+  const combo = current.combo ?? DEFAULT_COMBO;
+  const down = comboHeld(lastMask, heldIds, combo);
   if (down && !held) {
     held = true;
     void onPress();
@@ -157,11 +178,35 @@ function onControllerState(states: any[]) { // eslint-disable-line @typescript-e
   }
 }
 
-// ---------- UI ----------
-function describeCombo(c: Combo): string {
-  if (!c.lower && !c.upper) return "Not set";
-  return `0x${c.upper.toString(16)}:${c.lower.toString(16)}`;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function onControllerState(states: any[]) {
+  const st = states?.[0];
+  if (!st) return;
+  lastMask = {
+    lower: Number(st.ulButtons ?? 0) >>> 0,
+    upper: Number(st.ulUpperButtons ?? 0) >>> 0,
+  };
+  monitorCb?.(
+    `mask ${lastMask.upper.toString(16)}:${lastMask.lower.toString(16)}  ids [${[...heldIds].join(",")}]`
+  );
+  evaluate();
 }
+
+function onInputMessage(_controller: number, button: number, pressed: boolean) {
+  if (pressed) heldIds.add(button);
+  else heldIds.delete(button);
+  monitorCb?.(
+    `mask ${lastMask.upper.toString(16)}:${lastMask.lower.toString(16)}  ids [${[...heldIds].join(",")}]`
+  );
+  evaluate();
+}
+
+// ---------- UI ----------
+const MODE_OPTIONS = [
+  { data: "enter", label: "Enter" },
+  { data: "none", label: "None" },
+  { data: "custom", label: "Key / combination" },
+];
 
 function KeyPicker(props: {
   label: string;
@@ -175,17 +220,22 @@ function KeyPicker(props: {
     const mods = new Set<number>();
     const handler = (e: KeyboardEvent) => {
       e.preventDefault();
+      e.stopPropagation();
       const code = hidFromEvent(e);
       if (code === undefined) return;
       if (MOD_CODES.has(code)) {
-        mods.add(code);
+        mods.add(code); // wait for the main key of the combination
         return;
       }
       props.onChange({ mode: "custom", code, mods: [...mods] });
       setRecording(false);
     };
     window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
+    const timeout = setTimeout(() => setRecording(false), 15000);
+    return () => {
+      window.removeEventListener("keydown", handler, true);
+      clearTimeout(timeout);
+    };
   }, [recording]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
@@ -193,24 +243,56 @@ function KeyPicker(props: {
       <PanelSectionRow>
         <DropdownItem
           label={props.label}
-          rgOptions={[
-            { data: "none", label: "None" },
-            { data: "enter", label: "Enter" },
-            { data: "custom", label: "Custom" },
-          ]}
+          rgOptions={MODE_OPTIONS}
           selectedOption={props.value.mode}
           onChange={(o) => {
             const mode = o.data as KeySpec["mode"];
             props.onChange({ ...props.value, mode, code: props.value.code || KEY_ENTER });
+            if (mode === "custom") setRecording(true);
           }}
         />
       </PanelSectionRow>
       {props.value.mode === "custom" && (
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => setRecording(!recording)}>
-            {recording ? "Press the key now..." : `Key: ${describeKey(props.value)} (tap to record)`}
+            {recording
+              ? "Listening... press a key or combination (15s)"
+              : `${describeKey(props.value)}  (tap to re-record)`}
           </ButtonItem>
         </PanelSectionRow>
+      )}
+    </>
+  );
+}
+
+function OverrideEntry(props: {
+  appid: string;
+  profile: Profile;
+  onChange: (p: Profile) => void;
+  onRemove: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const p = props.profile;
+  return (
+    <>
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={() => setOpen(!open)}>
+          {open ? "v " : "> "}
+          {p.name || `App ${props.appid}`}
+        </ButtonItem>
+      </PanelSectionRow>
+      {open && (
+        <>
+          <KeyPicker label="Press before typing" value={p.before_key}
+            onChange={(k) => props.onChange({ ...p, before_key: k })} />
+          <KeyPicker label="Press after typing" value={p.after_key}
+            onChange={(k) => props.onChange({ ...p, after_key: k })} />
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={props.onRemove}>
+              Remove override
+            </ButtonItem>
+          </PanelSectionRow>
+        </>
       )}
     </>
   );
@@ -222,7 +304,9 @@ function Panel() {
   const [status, setStatus] = useState<Status | null>(null);
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [capturing, setCapturing] = useState(false);
-  const [perGame, setPerGame] = useState(false);
+  const [overridesOpen, setOverridesOpen] = useState(false);
+  const [monitor, setMonitor] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const appid = runningAppId();
 
   const refresh = async () => {
@@ -231,70 +315,161 @@ function Panel() {
   };
 
   useEffect(() => {
-    void getSettings().then((s) => {
-      setLocal(s);
-      setPerGame(!!appid && !!s.profiles?.[appid]);
-    });
+    void getSettings().then(setLocal);
     void refresh();
     const t = setInterval(async () => {
       setProgress(await getProgress());
       setStatus(await getStatus());
     }, 1500);
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      monitorCb = null;
+      captureCb = null;
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    monitorCb = monitor === null ? null : setMonitor;
+    if (monitor === null) return;
+    return () => { monitorCb = null; };
+  }, [monitor === null]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!settings) return <PanelSection title="Ubermoc Speech">Loading...</PanelSection>;
 
-  const view = perGame && appid ? effective(settings, appid) : settings;
-
   const update = async (patch: Partial<Settings>) => {
-    const next: Settings =
-      perGame && appid
-        ? { ...settings, profiles: { ...settings.profiles, [appid]: { ...settings.profiles?.[appid], ...patch } } }
-        : { ...settings, ...patch };
+    const next: Settings = { ...settings, ...patch };
     setLocal(next);
     current = next;
     await setSettings(next);
   };
 
-  const toggleProfile = async (on: boolean) => {
-    setPerGame(on);
-    if (!appid) return;
+  const setProfile = (id: string, p: Profile | null) => {
     const profiles = { ...settings.profiles };
-    if (on) profiles[appid] = {};
-    else delete profiles[appid];
-    const next = { ...settings, profiles };
-    setLocal(next);
-    current = next;
-    await setSettings(next);
+    if (p) profiles[id] = p;
+    else delete profiles[id];
+    return update({ profiles });
+  };
+
+  const addOverride = (id: string, name: string) => {
+    if (settings.profiles?.[id]) return;
+    return setProfile(id, {
+      name,
+      before_key: settings.before_key,
+      after_key: settings.after_key,
+    });
   };
 
   const recordCombo = () => {
     setCapturing(true);
-    let best: Combo = { lower: 0, upper: 0 };
+    const seen: Combo = { lower: 0, upper: 0 };
+    const seenIds = new Set<number>();
     let timer: ReturnType<typeof setTimeout> | undefined;
-    captureCb = (c) => {
-      if (c.lower === 0 && c.upper === 0) return;
-      // keep the largest set seen; finish shortly after input settles
-      best = { lower: best.lower | c.lower, upper: best.upper | c.upper };
+    const finish = () => {
+      captureCb = null;
+      setCapturing(false);
+      const combo: Combo = { ...seen, ids: [...seenIds] };
+      if (!comboEmpty(combo)) void update({ combo });
+      else toaster.toast({ title: "Ubermoc Speech", body: "No button input detected - see 'Live input' below" });
+    };
+    // Give up after 10s of silence.
+    timer = setTimeout(finish, 10000);
+    captureCb = (mask, ids) => {
+      if (!mask.lower && !mask.upper && ids.size === 0) return;
+      seen.lower |= mask.lower;
+      seen.upper |= mask.upper;
+      ids.forEach((i) => seenIds.add(i));
       clearTimeout(timer);
-      timer = setTimeout(() => {
-        captureCb = null;
-        setCapturing(false);
-        void update({ combo: best });
-      }, 700);
+      timer = setTimeout(finish, 800); // finish shortly after input settles
     };
   };
 
   const installed = models.filter((m) => m.installed);
+  const apps = libraryApps().filter((a) => !settings.profiles?.[a.appid]);
+  const profileEntries = Object.entries(settings.profiles ?? {});
 
   return (
     <>
+      <PanelSection title="Global">
+        <KeyPicker label="Press before typing" value={settings.before_key}
+          onChange={(k) => update({ before_key: k })} />
+        <KeyPicker label="Press after typing" value={settings.after_key}
+          onChange={(k) => update({ after_key: k })} />
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={recordCombo} disabled={capturing}>
+            {capturing
+              ? "Listening... hold your buttons, then release"
+              : `Hold-to-talk: ${describeCombo(settings.combo)} (tap to record)`}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => update({ combo: DEFAULT_COMBO })}>
+            Reset hold-to-talk to R4 + R5
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Live input"
+            description={monitor ?? "Shows buttons the plugin detects (for troubleshooting)"}
+            checked={monitor !== null}
+            onChange={(on) => setMonitor(on ? "waiting for input..." : null)}
+          />
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Game & app overrides">
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={() => setOverridesOpen(!overridesOpen)}>
+            {overridesOpen ? "v " : "> "}
+            {profileEntries.length
+              ? `${profileEntries.length} override${profileEntries.length > 1 ? "s" : ""}`
+              : "No overrides - tap to add"}
+          </ButtonItem>
+        </PanelSectionRow>
+        {overridesOpen && (
+          <>
+            {appid && !settings.profiles?.[appid] && (
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => addOverride(appid, runningAppName())}>
+                  Add running game{runningAppName() ? `: ${runningAppName()}` : ""}
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            {apps.length > 0 && (
+              <PanelSectionRow>
+                <DropdownItem
+                  label="Add from library"
+                  rgOptions={apps.map((a) => ({ data: a.appid, label: a.name }))}
+                  selectedOption={undefined}
+                  strDefaultLabel="Choose a game or app..."
+                  onChange={(o) => {
+                    const a = apps.find((x) => x.appid === o.data);
+                    if (a) void addOverride(a.appid, a.name);
+                  }}
+                />
+              </PanelSectionRow>
+            )}
+            {profileEntries.map(([id, p]) => (
+              <OverrideEntry
+                key={id}
+                appid={id}
+                profile={p}
+                onChange={(np) => setProfile(id, np)}
+                onRemove={() => setProfile(id, null)}
+              />
+            ))}
+          </>
+        )}
+      </PanelSection>
+
       <PanelSection title="Server">
         <PanelSectionRow>
           <ToggleField
-            label={status?.running ? "Whisper server running" : "Whisper server stopped"}
-            description={status && !status.binary ? "whisper-server binary missing" : undefined}
+            label="Start server"
+            description={
+              status && !status.binary
+                ? "whisper-server binary missing - reinstall the plugin"
+                : "Necessary for dictation to work"
+            }
             checked={!!status?.running}
             onChange={async (on) => {
               const r = on ? await startServer() : await stopServer();
@@ -305,41 +480,25 @@ function Panel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
-            label="Start with Steam"
+            label="Start on boot"
             checked={settings.autostart}
             onChange={(v) => update({ autostart: v })}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <SliderField
+            label="CPU threads"
+            value={settings.threads}
+            min={1}
+            max={8}
+            step={1}
+            showValue
+            onChange={(v) => update({ threads: v })}
           />
         </PanelSectionRow>
       </PanelSection>
 
       <PanelSection title="Models">
-        {models.map((m) => (
-          <PanelSectionRow key={m.name}>
-            {progress[m.name] !== undefined ? (
-              <ProgressBarWithInfo
-                label={`Downloading ${m.name}`}
-                nProgress={progress[m.name] * 100}
-                sOperationText={`${Math.round(progress[m.name] * 100)}%`}
-              />
-            ) : (
-              <ButtonItem
-                layout="below"
-                description={`${m.size_mb} MB`}
-                onClick={async () => {
-                  if (m.installed) await deleteModel(m.name);
-                  else {
-                    setProgress({ ...progress, [m.name]: 0 });
-                    const r = await downloadModel(m.name);
-                    if (!r.ok) toaster.toast({ title: "Download failed", body: r.error ?? "" });
-                  }
-                  await refresh();
-                }}
-              >
-                {m.installed ? `Delete ${m.name}` : `Download ${m.name}`}
-              </ButtonItem>
-            )}
-          </PanelSectionRow>
-        ))}
         {installed.length > 0 && (
           <PanelSectionRow>
             <DropdownItem
@@ -356,44 +515,48 @@ function Panel() {
             />
           </PanelSectionRow>
         )}
-      </PanelSection>
-
-      <PanelSection title="Hold to talk">
-        {appid && (
-          <PanelSectionRow>
-            <ToggleField
-              label="Use per-game profile"
-              description={`Overrides for app ${appid}`}
-              checked={perGame}
-              onChange={toggleProfile}
-            />
+        {models.map((m) => (
+          <PanelSectionRow key={m.name}>
+            {progress[m.name] !== undefined ? (
+              <ProgressBarWithInfo
+                label={`Downloading ${m.name}`}
+                nProgress={progress[m.name] * 100}
+                sOperationText={`${Math.round(progress[m.name] * 100)}%`}
+              />
+            ) : m.installed ? (
+              <ButtonItem
+                layout="below"
+                description={`${m.size_mb} MB - saved permanently`}
+                disabled={m.name === settings.model}
+                onClick={async () => {
+                  if (confirmDelete !== m.name) {
+                    setConfirmDelete(m.name);
+                    setTimeout(() => setConfirmDelete((c) => (c === m.name ? null : c)), 4000);
+                    return;
+                  }
+                  setConfirmDelete(null);
+                  await deleteModel(m.name);
+                  await refresh();
+                }}
+              >
+                {confirmDelete === m.name ? `Tap again to delete ${m.name}` : `${m.name} installed (delete)`}
+              </ButtonItem>
+            ) : (
+              <ButtonItem
+                layout="below"
+                description={`${m.size_mb} MB`}
+                onClick={async () => {
+                  setProgress({ ...progress, [m.name]: 0 });
+                  const r = await downloadModel(m.name);
+                  if (!r.ok) toaster.toast({ title: "Download failed", body: r.error ?? "" });
+                  await refresh();
+                }}
+              >
+                Download {m.name}
+              </ButtonItem>
+            )}
           </PanelSectionRow>
-        )}
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={recordCombo} disabled={capturing}>
-            {capturing
-              ? "Hold your buttons, then release..."
-              : `Combo: ${describeCombo(view.combo)} (tap to record)`}
-          </ButtonItem>
-        </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => update({ combo: DEFAULT_COMBO })}>
-            Reset combo to R4 + R5
-          </ButtonItem>
-        </PanelSectionRow>
-        <KeyPicker label="Key before text" value={view.before_key} onChange={(k) => update({ before_key: k })} />
-        <KeyPicker label="Key after text" value={view.after_key} onChange={(k) => update({ after_key: k })} />
-        <PanelSectionRow>
-          <SliderField
-            label="CPU threads"
-            value={settings.threads}
-            min={1}
-            max={8}
-            step={1}
-            showValue
-            onChange={(v) => update({ threads: v })}
-          />
-        </PanelSectionRow>
+        ))}
       </PanelSection>
     </>
   );
@@ -403,7 +566,8 @@ export default definePlugin(() => {
   void getSettings().then((s) => {
     current = s;
   });
-  const reg = SteamClient.Input.RegisterForControllerStateChanges(onControllerState);
+  const regState = SteamClient.Input.RegisterForControllerStateChanges(onControllerState);
+  const regMsg = SteamClient.Input.RegisterForControllerInputMessages?.(onInputMessage);
 
   return {
     name: "Ubermoc Speech",
@@ -411,8 +575,10 @@ export default definePlugin(() => {
     content: <Panel />,
     icon: <FaMicrophone />,
     onDismount() {
-      reg?.unregister?.();
+      regState?.unregister?.();
+      regMsg?.unregister?.();
       captureCb = null;
+      monitorCb = null;
     },
   };
 });
