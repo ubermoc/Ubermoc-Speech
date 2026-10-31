@@ -32,6 +32,7 @@ interface Settings {
   language: string;
   threads: number;
   autostart: boolean;
+  punctuation: "auto" | "spoken";
   combo: Combo;
   before_key: KeySpec;
   after_key: KeySpec;
@@ -195,6 +196,29 @@ function onControllerState(states: any[]) {
   evaluate();
 }
 
+// Third feed: the standard browser Gamepad API. Ids are offset by 1000 so they
+// never collide with Steam's own button ids.
+let padPrev = new Set<number>();
+function pollGamepads() {
+  const pads = navigator.getGamepads?.() ?? [];
+  const now = new Set<number>();
+  for (const pad of pads) {
+    pad?.buttons.forEach((b, i) => {
+      if (b.pressed) now.add(1000 + i);
+    });
+  }
+  let changed = false;
+  now.forEach((i) => { if (!padPrev.has(i)) { heldIds.add(i); changed = true; } });
+  padPrev.forEach((i) => { if (!now.has(i)) { heldIds.delete(i); changed = true; } });
+  padPrev = now;
+  if (changed) {
+    monitorCb?.(
+      `mask ${lastMask.upper.toString(16)}:${lastMask.lower.toString(16)}  ids [${[...heldIds].join(",")}]`
+    );
+    evaluate();
+  }
+}
+
 function onInputMessage(_controller: number, button: number, pressed: boolean) {
   if (pressed) heldIds.add(button);
   else heldIds.delete(button);
@@ -208,7 +232,7 @@ function onInputMessage(_controller: number, button: number, pressed: boolean) {
 const MODE_OPTIONS = [
   { data: "enter", label: "Enter" },
   { data: "none", label: "None" },
-  { data: "custom", label: "Key / combination" },
+  { data: "custom", label: "Keyboard key / combination" },
 ];
 
 function KeyPicker(props: {
@@ -259,7 +283,7 @@ function KeyPicker(props: {
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => setRecording(!recording)}>
             {recording
-              ? "Listening... press a key or combination (15s)"
+              ? "Listening for a KEYBOARD key... press it now (15s). On the Deck use Steam + X for the on-screen keyboard"
               : `${describeKey(props.value)}  (tap to re-record)`}
           </ButtonItem>
         </PanelSectionRow>
@@ -404,14 +428,30 @@ function Panel() {
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={recordCombo} disabled={capturing}>
             {capturing
-              ? "Listening... hold your buttons, then release"
-              : `Hold-to-talk: ${describeCombo(settings.combo)} (tap to record)`}
+              ? "Listening for CONTROLLER buttons... hold them together now, then let go"
+              : `Hold-to-talk buttons: ${describeCombo(settings.combo)}  (tap to change)`}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => update({ combo: DEFAULT_COMBO })}>
             Reset hold-to-talk to R4 + R5
           </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Punctuation"
+            description={
+              settings.punctuation === "spoken"
+                ? 'Only types punctuation you say out loud, e.g. "comma", "period", "question mark", "new line".'
+                : "Whisper decides where punctuation goes. Saying \"period\" types the word."
+            }
+            rgOptions={[
+              { data: "auto", label: "Automatic (Whisper adds it)" },
+              { data: "spoken", label: "Spoken (I say it)" },
+            ]}
+            selectedOption={settings.punctuation ?? "auto"}
+            onChange={(o) => update({ punctuation: o.data as Settings["punctuation"] })}
+          />
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
@@ -611,6 +651,7 @@ export default definePlugin(() => {
   });
   const regState = SteamClient.Input.RegisterForControllerStateChanges(onControllerState);
   const regMsg = SteamClient.Input.RegisterForControllerInputMessages?.(onInputMessage);
+  const padTimer = setInterval(pollGamepads, 30);
 
   return {
     name: "Ubermoc Speech",
@@ -620,6 +661,7 @@ export default definePlugin(() => {
     onDismount() {
       regState?.unregister?.();
       regMsg?.unregister?.();
+      clearInterval(padTimer);
       captureCb = null;
       monitorCb = null;
     },

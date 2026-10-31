@@ -32,14 +32,35 @@ export function comboHeld(
     (combo.lower || combo.upper) &&
     (state.lower & combo.lower) === combo.lower &&
     (state.upper & combo.upper) === combo.upper;
-  const byIds = !!combo.ids?.length && combo.ids.every((i) => heldIds.has(i));
+  // Each feed is judged on its own: the combo is held if ANY feed reports
+  // all of the buttons it recorded (ids >= 1000 come from the Gamepad API).
+  const ids = combo.ids ?? [];
+  const steam = ids.filter((i) => i < 1000);
+  const pad = ids.filter((i) => i >= 1000);
+  const byIds =
+    (steam.length > 0 && steam.every((i) => heldIds.has(i))) ||
+    (pad.length > 0 && pad.every((i) => heldIds.has(i)));
   return !!(byMask || byIds);
 }
+
+const NAMES: Array<[string, "lower" | "upper", number]> = [
+  ["R5", "lower", LOWER.R5], ["L5", "lower", LOWER.L5],
+  ["R4", "upper", UPPER.R4], ["L4", "upper", UPPER.L4],
+];
 
 export function describeCombo(c: Combo): string {
   if (comboEmpty(c)) return "Not set";
   const parts: string[] = [];
-  if (c.lower || c.upper) parts.push(`mask ${c.upper.toString(16)}:${c.lower.toString(16)}`);
-  if (c.ids?.length) parts.push(`ids ${c.ids.join("+")}`);
-  return parts.join(" / ");
+  let lower = c.lower;
+  let upper = c.upper;
+  for (const [name, which, bit] of NAMES) {
+    const have = which === "lower" ? lower : upper;
+    if ((have & bit) === bit) {
+      parts.push(name);
+      if (which === "lower") lower &= ~bit; else upper &= ~bit;
+    }
+  }
+  if (lower || upper) parts.push(`buttons ${upper.toString(16)}:${lower.toString(16)}`);
+  if (c.ids?.length) parts.push(`Steam ids ${c.ids.join("+")}`);
+  return parts.join(" + ");
 }

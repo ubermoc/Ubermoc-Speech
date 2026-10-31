@@ -38,6 +38,9 @@ DEFAULT_SETTINGS = {
     "language": "en",
     "threads": 4,
     "autostart": True,
+    # "auto": keep the punctuation Whisper adds. "spoken": ignore Whisper's own
+    # punctuation and only type what you say aloud ("period", "comma", ...).
+    "punctuation": "auto",
     # Combo is stored as raw controller bitmasks so any button set can be recorded.
     "combo": {"lower": 0x10000, "upper": 0x400, "ids": []},  # R5 + R4 (see src/buttons.ts)
     "before_key": {"mode": "enter", "code": 40},   # none | enter | custom
@@ -58,6 +61,73 @@ def _ssl_context() -> ssl.SSLContext:
         if os.path.exists(path):
             return ssl.create_default_context(cafile=path)
     return ssl.create_default_context()
+
+
+SPOKEN_MARKS = [
+    # (spoken phrase, text to type, attach_left, ends_sentence)
+    (r"question mark", "?", True, True),
+    (r"exclamation (?:mark|point)", "!", True, True),
+    (r"full stop", ".", True, True),
+    (r"period", ".", True, True),
+    (r"comma", ",", True, False),
+    (r"semi-?colon", ";", True, False),
+    (r"colon", ":", True, False),
+    (r"ellipsis", "...", True, False),
+    (r"open (?:paren|parenthesis|bracket)", "(", False, False),
+    (r"close (?:paren|parenthesis|bracket)", ")", True, False),
+    (r"open quote", '"', False, False),
+    (r"(?:close|end) quote", '"', True, False),
+    (r"new paragraph", "\n\n", True, True),
+    (r"new line", "\n", True, True),
+]
+
+
+def apply_punctuation(text: str, mode: str) -> str:
+    """auto: leave Whisper's output alone. spoken: type only dictated punctuation."""
+    import re
+
+    if mode != "spoken":
+        return text
+    # 1. Whisper capitalises after the punctuation it guessed. Lowercase those
+    #    words (except "I" forms) before the guessed punctuation is removed.
+    def relower(m):
+        word = m.group(2)
+        if re.match(r"I(?:'(?:m|ll|ve|d))?$", word):
+            return m.group(0)
+        return m.group(1) + word[0].lower() + word[1:]
+    text = re.sub(r"([.!?]\s+)([A-Z][\w']*)", relower, text)
+    # 2. Drop punctuation Whisper added on its own.
+    text = re.sub(r"[.,;:!?]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    # 3. Turn spoken punctuation into symbols.
+    tokens = [(re.compile(rf"\b{pat}\b", re.I), sym, left, end) for pat, sym, left, end in SPOKEN_MARKS]
+    marker = "\x00{}\x00"
+    for i, (rx, sym, left, end) in enumerate(tokens):
+        text = rx.sub(marker.format(i), text)
+    out = ""
+    cap_next = False
+    for piece in re.split(r"(\x00\d+\x00)", text):
+        if not piece:
+            continue
+        m = re.fullmatch(r"\x00(\d+)\x00", piece)
+        if m:
+            _rx, sym, left, end = tokens[int(m.group(1))]
+            if left:
+                out = out.rstrip(" ")
+                out += sym + ("" if sym.startswith("\n") else " ")
+            else:
+                out += sym
+            cap_next = cap_next or end
+            continue
+        piece = piece.strip(" ") if out.endswith(("(", "\n", '"')) else piece
+        if cap_next:
+            stripped = piece.lstrip()
+            lead = piece[: len(piece) - len(stripped)]
+            piece = lead + (stripped[:1].upper() + stripped[1:])
+            cap_next = False if stripped else True
+        out += piece
+    out = re.sub(r" +", " ", out).strip()
+    return re.sub(r"^([^A-Za-z]*)([a-z])", lambda m: m.group(1) + m.group(2).upper(), out)
 
 
 class Plugin:
@@ -363,7 +433,8 @@ class Plugin:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         with urllib.request.urlopen(req, timeout=120) as r:
-            return json.loads(r.read().decode()).get("text", "").strip()
+            text = json.loads(r.read().decode()).get("text", "").strip()
+        return apply_punctuation(text, self.settings.get("punctuation", "auto"))
 
     # ---------- self-update ----------
     def _installed_version(self) -> str:
