@@ -360,8 +360,16 @@ class Plugin:
         }
 
     # ---------- recording ----------
+    def _user_uid(self) -> int:
+        """UID of the desktop user (Decky itself runs as root). Not always 1000
+        outside the Steam Deck, so read it from the owner of their home dir."""
+        try:
+            return os.stat(getattr(decky, "DECKY_USER_HOME", "/home/deck")).st_uid
+        except OSError:
+            return 1000
+
     def _audio_env(self) -> dict:
-        uid = os.environ.get("DECKY_USER_ID") or "1000"
+        uid = str(self._user_uid())
         runtime = f"/run/user/{uid}"
         env = dict(os.environ)
         env["XDG_RUNTIME_DIR"] = runtime
@@ -538,7 +546,7 @@ class Plugin:
         env = dict(os.environ)
         env.setdefault("DISPLAY", ":0")
         env.setdefault("WAYLAND_DISPLAY", "wayland-0")
-        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.environ.get('DECKY_USER_ID', '1000')}")
+        env.setdefault("XDG_RUNTIME_DIR", f"/run/user/{self._user_uid()}")
         for name, cmd in (
             ("wl-copy", ["wl-copy"]),
             ("xclip", ["xclip", "-selection", "clipboard"]),
