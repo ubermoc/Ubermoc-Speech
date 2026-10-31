@@ -56,6 +56,9 @@ const startRecording = callable<[], { ok: boolean; error?: string }>("start_reco
 const stopAndTranscribe = callable<[], { ok: boolean; text?: string; error?: string }>(
   "stop_and_transcribe"
 );
+interface UpdateInfo { ok: boolean; installed: string; latest?: string; available?: boolean; error?: string }
+const checkUpdate = callable<[], UpdateInfo>("check_update");
+const installUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("install_update");
 const setClipboard = callable<[string], { ok: boolean; method: string }>("set_clipboard");
 
 // ---------- module state (works with the panel closed) ----------
@@ -307,6 +310,9 @@ function Panel() {
   const [overridesOpen, setOverridesOpen] = useState(false);
   const [monitor, setMonitor] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [upd, setUpd] = useState<UpdateInfo | null>(null);
+  const [updMsg, setUpdMsg] = useState<string>("");
+  const [updBusy, setUpdBusy] = useState(false);
   const appid = runningAppId();
 
   const refresh = async () => {
@@ -317,6 +323,7 @@ function Panel() {
   useEffect(() => {
     void getSettings().then(setLocal);
     void refresh();
+    void checkUpdate().then(setUpd);
     const t = setInterval(async () => {
       setProgress(await getProgress());
       setStatus(await getStatus());
@@ -495,6 +502,42 @@ function Panel() {
             showValue
             onChange={(v) => update({ threads: v })}
           />
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Updates">
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            disabled={updBusy}
+            description={
+              updMsg ||
+              (upd
+                ? upd.error ?? `Installed ${upd.installed}${upd.latest ? `, latest ${upd.latest}` : ""}`
+                : "Checking...")
+            }
+            onClick={async () => {
+              setUpdBusy(true);
+              try {
+                if (upd?.available) {
+                  setUpdMsg("Downloading and installing...");
+                  const r = await installUpdate();
+                  setUpdMsg(
+                    r.ok
+                      ? "Updated. Steam's plugin loader is restarting - reopen the panel in a few seconds."
+                      : `Update failed: ${r.error ?? "unknown error"}`
+                  );
+                } else {
+                  setUpdMsg("");
+                  setUpd(await checkUpdate());
+                }
+              } finally {
+                setUpdBusy(false);
+              }
+            }}
+          >
+            {upd?.available ? `Install update (${upd.latest})` : "Check for updates"}
+          </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 

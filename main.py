@@ -11,14 +11,18 @@ import shutil
 import signal
 import ssl
 import subprocess
+import tempfile
 import time
 import urllib.request
 import uuid
+import zipfile
 
 import decky  # provided by Decky Loader
 
 HOST = "127.0.0.1"
 PORT = 8178
+REPO = "ubermoc/Ubermoc-Speech"
+RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/tags/latest"
 MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 MODELS = {
     "tiny.en": 75,
@@ -360,6 +364,102 @@ class Plugin:
         )
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read().decode()).get("text", "").strip()
+
+    # ---------- self-update ----------
+    def _installed_version(self) -> str:
+        try:
+            with open(os.path.join(decky.DECKY_PLUGIN_DIR, "VERSION")) as f:
+                return f.read().strip()
+        except OSError:
+            return "unknown"
+
+    def _fetch_release(self) -> dict:
+        req = urllib.request.Request(
+            RELEASE_API,
+            headers={"User-Agent": "ubermoc-speech", "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, context=_ssl_context(), timeout=20) as r:
+            return json.loads(r.read().decode())
+
+    async def check_update(self) -> dict:
+        installed = self._installed_version()
+        try:
+            rel = await asyncio.get_event_loop().run_in_executor(None, self._fetch_release)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "installed": installed, "error": f"could not reach GitHub: {e}"}
+        body = rel.get("body") or ""
+        latest = body.rsplit(" ", 1)[-1].strip() if "Automatic build of" in body else ""
+        asset = next((a for a in rel.get("assets", []) if a["name"].endswith(".zip")), None)
+        if not latest or not asset:
+            return {"ok": False, "installed": installed, "error": "no build found on GitHub"}
+        return {
+            "ok": True,
+            "installed": installed,
+            "latest": latest,
+            "available": latest != installed,
+        }
+
+    def _download_and_stage(self) -> tuple[str, str]:
+        rel = self._fetch_release()
+        asset = next(a for a in rel["assets"] if a["name"].endswith(".zip"))
+        latest = rel["body"].rsplit(" ", 1)[-1].strip()
+        work = tempfile.mkdtemp(prefix="ubermoc-update-")
+        zpath = os.path.join(work, "update.zip")
+        req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "ubermoc-speech"})
+        with urllib.request.urlopen(req, context=_ssl_context(), timeout=120) as r, open(zpath, "wb") as out:
+            shutil.copyfileobj(r, out)
+        if os.path.getsize(zpath) != asset["size"]:
+            raise IOError("update download incomplete")
+        extract = os.path.join(work, "x")
+        with zipfile.ZipFile(zpath) as z:
+            if z.testzip() is not None:
+                raise IOError("update zip is corrupt")
+            root = os.path.realpath(extract)
+            for name in z.namelist():  # refuse path traversal
+                if not os.path.realpath(os.path.join(root, name)).startswith(root + os.sep):
+                    raise IOError("unsafe path in update zip")
+            z.extractall(extract)
+        top = os.path.join(extract, os.listdir(extract)[0])
+        for need in ("main.py", "plugin.json", os.path.join("dist", "index.js")):
+            if not os.path.exists(os.path.join(top, need)):
+                raise IOError(f"update is missing {need}")
+        return top, latest
+
+    def _apply(self, top: str):
+        """Overwrite plugin files; every file goes via a temp name + atomic rename."""
+        dest_root = decky.DECKY_PLUGIN_DIR
+        backup = os.path.join(os.path.dirname(self._models_dir()), "previous-version")
+        shutil.rmtree(backup, ignore_errors=True)
+        shutil.copytree(dest_root, backup, symlinks=True)  # kept for manual rollback
+        for dirpath, _dirs, files in os.walk(top):
+            rel = os.path.relpath(dirpath, top)
+            target_dir = os.path.join(dest_root, rel) if rel != "." else dest_root
+            os.makedirs(target_dir, exist_ok=True)
+            for fname in files:
+                src = os.path.join(dirpath, fname)
+                dst = os.path.join(target_dir, fname)
+                tmp = dst + ".new"
+                shutil.copy2(src, tmp)
+                os.replace(tmp, dst)
+
+    async def install_update(self) -> dict:
+        try:
+            top, latest = await asyncio.get_event_loop().run_in_executor(None, self._download_and_stage)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"update download failed: {e}")
+            return {"ok": False, "error": str(e)}
+        try:
+            await Plugin.stop_server(self)
+            await asyncio.get_event_loop().run_in_executor(None, self._apply, top)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"update apply failed: {e}")
+            return {"ok": False, "error": str(e)}
+        # Restart Decky shortly so the new backend and frontend are loaded.
+        subprocess.Popen(
+            ["sh", "-c", "sleep 3; systemctl restart plugin_loader"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+        return {"ok": True, "version": latest}
 
     # ---------- clipboard ----------
     async def set_clipboard(self, text: str) -> dict:
