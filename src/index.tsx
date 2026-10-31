@@ -10,7 +10,7 @@ import {
   ToggleField,
   definePlugin,
 } from "@decky/ui";
-import { useEffect, useState } from "react";
+import { Component, ReactNode, useEffect, useState } from "react";
 import { FaMicrophone } from "react-icons/fa";
 import { Combo, DEFAULT_COMBO, comboEmpty, comboHeld, describeCombo } from "./buttons";
 import {
@@ -81,7 +81,8 @@ function effective(s: Settings, appid: string): Settings {
 
 function libraryApps(): LibApp[] {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const all = (window as any).appStore?.allApps ?? [];
+  const raw = (window as any).appStore?.allApps;
+  const all = Array.isArray(raw) ? raw : [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return all
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -656,6 +657,29 @@ function Panel() {
   );
 }
 
+// Shows the real error on screen (and logs it) instead of Decky's generic page.
+class Boundary extends Component<{ children?: ReactNode }, { err: string | null }> {
+  state = { err: null as string | null };
+  static getDerivedStateFromError(e: unknown) {
+    const err = e as Error;
+    return { err: String(err?.stack ?? err).slice(0, 700) };
+  }
+  componentDidCatch(e: unknown) {
+    const err = e as Error;
+    void logBackend(`render error: ${err?.stack ?? err}`);
+  }
+  render() {
+    if (this.state.err === null) return this.props.children;
+    return (
+      <PanelSection title="Ubermoc Speech hit an error">
+        <PanelSectionRow>
+          <div style={{ whiteSpace: "pre-wrap", fontSize: 11 }}>{this.state.err}</div>
+        </PanelSectionRow>
+      </PanelSection>
+    );
+  }
+}
+
 export default definePlugin(() => {
   void getSettings().then((s) => {
     current = s;
@@ -689,7 +713,11 @@ export default definePlugin(() => {
   return {
     name: "Ubermoc Speech",
     titleView: <div>Ubermoc Speech</div>,
-    content: <Panel />,
+    content: (
+      <Boundary>
+        <Panel />
+      </Boundary>
+    ),
     icon: <FaMicrophone />,
     onDismount() {
       regState?.unregister?.();

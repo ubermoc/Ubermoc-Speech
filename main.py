@@ -130,6 +130,64 @@ def apply_punctuation(text: str, mode: str) -> str:
     return re.sub(r"^([^A-Za-z]*)([a-z])", lambda m: m.group(1) + m.group(2).upper(), out)
 
 
+def _int(v, default, lo=None, hi=None):
+    if isinstance(v, bool) or not isinstance(v, int):
+        return default
+    if lo is not None and v < lo:
+        return default
+    if hi is not None and v > hi:
+        return default
+    return v
+
+
+def _key(v, default):
+    if not isinstance(v, dict) or v.get("mode") not in ("none", "enter", "custom"):
+        return dict(default)
+    mods = v.get("mods", [])
+    mods = [m for m in mods if isinstance(m, int) and not isinstance(m, bool)] if isinstance(mods, list) else []
+    return {"mode": v["mode"], "code": _int(v.get("code"), default["code"], 0, 255), "mods": mods}
+
+
+def sanitize_settings(data) -> dict:
+    """Settings files from older builds may have a different shape. Keep what is
+    valid and fall back to defaults for the rest, so the panel can never crash
+    on a stale file."""
+    d = data if isinstance(data, dict) else {}
+    out = dict(DEFAULT_SETTINGS)
+    if d.get("model") in MODELS:
+        out["model"] = d["model"]
+    if isinstance(d.get("language"), str):
+        out["language"] = d["language"]
+    out["threads"] = _int(d.get("threads"), out["threads"], 1, 32)
+    if isinstance(d.get("autostart"), bool):
+        out["autostart"] = d["autostart"]
+    if d.get("punctuation") in ("auto", "spoken"):
+        out["punctuation"] = d["punctuation"]
+    c = d.get("combo")
+    if isinstance(c, dict):
+        ids = c.get("ids", [])
+        ids = [i for i in ids if isinstance(i, int) and not isinstance(i, bool)] if isinstance(ids, list) else []
+        out["combo"] = {
+            "lower": _int(c.get("lower"), 0, 0),
+            "upper": _int(c.get("upper"), 0, 0),
+            "ids": ids,
+        }
+    out["before_key"] = _key(d.get("before_key"), DEFAULT_SETTINGS["before_key"])
+    out["after_key"] = _key(d.get("after_key"), DEFAULT_SETTINGS["after_key"])
+    profiles = {}
+    raw = d.get("profiles")
+    if isinstance(raw, dict):
+        for appid, p in raw.items():
+            if isinstance(p, dict) and isinstance(p.get("name"), str):
+                profiles[str(appid)] = {
+                    "name": p["name"],
+                    "before_key": _key(p.get("before_key"), out["before_key"]),
+                    "after_key": _key(p.get("after_key"), out["after_key"]),
+                }
+    out["profiles"] = profiles
+    return out
+
+
 class Plugin:
     server_proc: subprocess.Popen | None = None
     record_proc: subprocess.Popen | None = None
@@ -235,14 +293,13 @@ class Plugin:
                 data = json.load(f)
         except (OSError, ValueError):
             pass
-        merged = {**DEFAULT_SETTINGS, **data}
-        return merged
+        return sanitize_settings(data)
 
     async def get_settings(self) -> dict:
         return self.settings
 
     async def set_settings(self, settings: dict) -> dict:
-        self.settings = {**DEFAULT_SETTINGS, **settings}
+        self.settings = sanitize_settings(settings)
         os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
         with open(self._settings_file(), "w") as f:
             json.dump(self.settings, f, indent=2)
