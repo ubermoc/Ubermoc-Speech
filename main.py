@@ -24,25 +24,34 @@ PORT = 8178
 REPO = "ubermoc/Ubermoc-Speech"
 RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/tags/latest"
 MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+# name -> (approx size in MB, description). The file is ggml-<name>.bin.
 MODELS = {
-    "tiny.en": 75,
-    "base.en": 142,
-    "small.en": 466,
-    "tiny": 75,
-    "base": 142,
-    "small": 466,
+    "tiny.en": (75, "English only. Fastest, least accurate."),
+    "base.en": (142, "English only. Fast, good for short phrases."),
+    "base.en-q5_1": (57, "English only. Compressed base, smaller and a bit faster."),
+    "small.en": (466, "English only. Accurate, a good balance."),
+    "small.en-q5_1": (181, "English only. Compressed small, about the same accuracy."),
+    "medium.en": (1533, "English only. Very accurate but slow on handhelds."),
+    "medium.en-q5_0": (514, "English only. Compressed medium."),
+    "tiny": (75, "All languages. Fastest, least accurate."),
+    "base": (142, "All languages. Fast."),
+    "small": (466, "All languages. Accurate."),
+    "medium": (1533, "All languages. Very accurate but slow."),
+    "large-v3-turbo-q5_0": (547, "All languages. Near-best accuracy, compressed."),
+    "large-v3-turbo": (1624, "All languages. Best accuracy, heaviest."),
 }
 
 DEFAULT_SETTINGS = {
     "model": "base.en",
     "language": "en",
-    "threads": 4,
     "autostart": True,
     # "auto": keep the punctuation Whisper adds. "spoken": ignore Whisper's own
     # punctuation and only type what you say aloud ("period", "comma", ...).
     "punctuation": "auto",
-    # Combo is stored as raw controller bitmasks so any button set can be recorded.
-    "combo": {"lower": 0x10000, "upper": 0x400, "ids": []},  # R5 + R4 (see src/buttons.ts)
+    "indicator": True,   # popup notification while listening / transcribing
+    "rumble": True,      # light haptic pulse when listening starts and ends
+    # Steam button ids 33 + 45 = both right back buttons (see src/buttons.ts).
+    "combo": {"lower": 0, "upper": 0, "ids": [33, 45]},
     "before_key": {"mode": "enter", "code": 40},   # none | enter | custom
     "after_key": {"mode": "enter", "code": 40},
     "profiles": {},  # appid -> partial settings overriding the globals
@@ -158,9 +167,11 @@ def sanitize_settings(data) -> dict:
         out["model"] = d["model"]
     if isinstance(d.get("language"), str):
         out["language"] = d["language"]
-    out["threads"] = _int(d.get("threads"), out["threads"], 1, 32)
     if isinstance(d.get("autostart"), bool):
         out["autostart"] = d["autostart"]
+    for flag in ("indicator", "rumble"):
+        if isinstance(d.get(flag), bool):
+            out[flag] = d[flag]
     if d.get("punctuation") in ("auto", "spoken"):
         out["punctuation"] = d["punctuation"]
     c = d.get("combo")
@@ -172,6 +183,8 @@ def sanitize_settings(data) -> dict:
             "upper": _int(c.get("upper"), 0, 0),
             "ids": ids,
         }
+        if not (out["combo"]["lower"] or out["combo"]["upper"] or ids):
+            out["combo"] = dict(DEFAULT_SETTINGS["combo"])
     out["before_key"] = _key(d.get("before_key"), DEFAULT_SETTINGS["before_key"])
     out["after_key"] = _key(d.get("after_key"), DEFAULT_SETTINGS["after_key"])
     profiles = {}
@@ -274,7 +287,7 @@ class Plugin:
         expected = self._manifest().get(name)
         if expected:
             return size == expected
-        return size > MODELS.get(name, 0) * 1024 * 1024 * 0.9
+        return size > MODELS.get(name, (0, ""))[0] * 1024 * 1024 * 0.6
 
     def _model_path(self, name: str) -> str:
         return os.path.join(self._models_dir(), f"ggml-{name}.bin")
@@ -311,9 +324,10 @@ class Plugin:
             {
                 "name": name,
                 "size_mb": size,
+                "description": desc,
                 "installed": self._model_ok(name),
             }
-            for name, size in MODELS.items()
+            for name, (size, desc) in MODELS.items()
         ]
 
     async def download_model(self, name: str) -> dict:
@@ -391,7 +405,7 @@ class Plugin:
         os.chmod(binary, 0o755)
         env = {**os.environ, "LD_LIBRARY_PATH": os.path.dirname(binary)}
         cmd = [binary, "-m", model, "--host", HOST, "--port", str(PORT),
-               "-t", str(self.settings.get("threads", 4))]
+               "-t", str(min(4, os.cpu_count() or 4))]
         log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "whisper-server.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
         self.want_running = True
@@ -502,12 +516,15 @@ class Plugin:
         return apply_punctuation(text, self.settings.get("punctuation", "auto"))
 
     # ---------- self-update ----------
-    def _installed_version(self) -> str:
+    def _read_file(self, name: str) -> str:
         try:
-            with open(os.path.join(decky.DECKY_PLUGIN_DIR, "VERSION")) as f:
+            with open(os.path.join(decky.DECKY_PLUGIN_DIR, name)) as f:
                 return f.read().strip()
         except OSError:
-            return "unknown"
+            return ""
+
+    def _installed_info(self) -> dict:
+        return {"version": self._read_file("VERSION") or "unknown", "build": self._read_file("BUILD")}
 
     def _fetch_release(self) -> dict:
         req = urllib.request.Request(
@@ -517,28 +534,42 @@ class Plugin:
         with urllib.request.urlopen(req, context=_ssl_context(), timeout=20) as r:
             return json.loads(r.read().decode())
 
+    @staticmethod
+    def _parse_release(rel: dict) -> dict:
+        """Release notes look like 'Version 0.01 build abc1234'."""
+        import re
+
+        body = rel.get("body") or ""
+        m = re.search(r"Version\s+(\S+)\s+build\s+(\w+)", body)
+        if m:
+            return {"version": m.group(1), "build": m.group(2)}
+        m = re.search(r"build(?: of)?\s+(\w+)", body)  # older releases
+        return {"version": "unknown", "build": m.group(1) if m else ""}
+
+    async def get_version(self) -> dict:
+        return self._installed_info()
+
     async def check_update(self) -> dict:
-        installed = self._installed_version()
+        installed = self._installed_info()
         try:
             rel = await asyncio.get_event_loop().run_in_executor(None, self._fetch_release)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "installed": installed, "error": f"could not reach GitHub: {e}"}
-        body = rel.get("body") or ""
-        latest = body.rsplit(" ", 1)[-1].strip() if "Automatic build of" in body else ""
+        latest = self._parse_release(rel)
         asset = next((a for a in rel.get("assets", []) if a["name"].endswith(".zip")), None)
-        if not latest or not asset:
+        if not latest["build"] or not asset:
             return {"ok": False, "installed": installed, "error": "no build found on GitHub"}
         return {
             "ok": True,
             "installed": installed,
             "latest": latest,
-            "available": latest != installed,
+            "available": latest["build"] != installed["build"],
         }
 
     def _download_and_stage(self) -> tuple[str, str]:
         rel = self._fetch_release()
         asset = next(a for a in rel["assets"] if a["name"].endswith(".zip"))
-        latest = rel["body"].rsplit(" ", 1)[-1].strip()
+        latest = self._parse_release(rel)["version"]
         work = tempfile.mkdtemp(prefix="ubermoc-update-")
         zpath = os.path.join(work, "update.zip")
         req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "ubermoc-speech"})

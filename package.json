@@ -1,6 +1,6 @@
 {
   "name": "ubermoc-speech",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Hold-to-talk speech-to-text for the Steam Deck, powered by whisper.cpp",
   "type": "module",
   "scripts": {

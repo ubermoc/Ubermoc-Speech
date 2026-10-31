@@ -2,46 +2,68 @@ import { callable, toaster } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
+  Field,
   PanelSection,
   PanelSectionRow,
   ProgressBarWithInfo,
   Router,
-  SliderField,
   ToggleField,
   definePlugin,
 } from "@decky/ui";
 import { Component, ReactNode, useEffect, useState } from "react";
 import { FaMicrophone } from "react-icons/fa";
-import { Combo, DEFAULT_COMBO, comboEmpty, comboHeld, describeCombo } from "./buttons";
+import {
+  Combo,
+  DEFAULT_COMBO,
+  comboEmpty,
+  comboHeld,
+  describeCombo,
+  describePressed,
+  recordableSteamId,
+} from "./buttons";
 import {
   KEY_CTRL,
   KEY_ENTER,
+  KEY_OPTIONS,
   KEY_V,
   KeySpec,
-  MOD_CODES,
+  MOD_OPTIONS,
   describeKey,
   hidFromEvent,
+  modsFromEvent,
+  modsIndex,
 } from "./keys";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const SteamClient: any;
 
 // ---------- types ----------
+interface Profile { name: string; before_key: KeySpec; after_key: KeySpec }
 interface Settings {
   model: string;
   language: string;
-  threads: number;
   autostart: boolean;
+  indicator: boolean;
+  rumble: boolean;
   punctuation: "auto" | "spoken";
   combo: Combo;
   before_key: KeySpec;
   after_key: KeySpec;
   profiles: Record<string, Profile>;
 }
-interface Profile { name: string; before_key: KeySpec; after_key: KeySpec }
-interface LibApp { appid: string; name: string }
-interface ModelInfo { name: string; size_mb: number; installed: boolean }
+interface ModelInfo { name: string; size_mb: number; description: string; installed: boolean }
 interface Status { running: boolean; recording: boolean; binary: boolean }
+interface BuildInfo { version: string; build: string }
+interface UpdateInfo {
+  ok: boolean;
+  installed: BuildInfo;
+  latest?: BuildInfo;
+  available?: boolean;
+  error?: string;
+}
+interface LibApp { appid: string; name: string }
+interface DictResult { ok: boolean; text?: string; error?: string; at: number }
+type Phase = "idle" | "listening" | "transcribing";
 
 // ---------- backend ----------
 const getSettings = callable<[], Settings>("get_settings");
@@ -57,39 +79,27 @@ const startRecording = callable<[], { ok: boolean; error?: string }>("start_reco
 const stopAndTranscribe = callable<[], { ok: boolean; text?: string; error?: string }>(
   "stop_and_transcribe"
 );
-interface UpdateInfo { ok: boolean; installed: string; latest?: string; available?: boolean; error?: string }
+const setClipboard = callable<[string], { ok: boolean; method: string }>("set_clipboard");
 const checkUpdate = callable<[], UpdateInfo>("check_update");
 const installUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("install_update");
 const logBackend = callable<[string], boolean>("log");
-const setClipboard = callable<[string], { ok: boolean; method: string }>("set_clipboard");
 
 // ---------- module state (works with the panel closed) ----------
 let current: Settings | null = null;
-let held = false;
-let busy = false;
+const feeds = { state: false, messages: false, pad: false, keys: false, haptics: false };
+let lastController = 0;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function steamInput(): any {
+  return (typeof SteamClient !== "undefined" && SteamClient?.Input) || null;
+}
 
 function runningAppId(): string {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const app = (Router as any).MainRunningApp;
   return app?.appid ? String(app.appid) : "";
-}
-
-function effective(s: Settings, appid: string): Settings {
-  const p = s.profiles?.[appid];
-  return p ? { ...s, before_key: p.before_key, after_key: p.after_key } : s;
-}
-
-function libraryApps(): LibApp[] {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const raw = (window as any).appStore?.allApps;
-  const all = Array.isArray(raw) ? raw : [];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return all
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .filter((a: any) => a?.appid && a?.display_name)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    .map((a: any) => ({ appid: String(a.appid), name: String(a.display_name) }))
-    .sort((a: LibApp, b: LibApp) => a.name.localeCompare(b.name));
 }
 
 function runningAppName(): string {
@@ -98,24 +108,143 @@ function runningAppName(): string {
   return app?.display_name ? String(app.display_name) : "";
 }
 
+function effective(s: Settings, appid: string): Settings {
+  const p = s.profiles?.[appid];
+  return p ? { ...s, before_key: p.before_key, after_key: p.after_key } : s;
+}
+
+// ---------- installed games (Steam and non-Steam kept separate) ----------
+const APP_GAME = 1;
+const APP_APPLICATION = 2;
+const APP_SHORTCUT = 1073741824;
+
+function installedApps(): { steam: LibApp[]; other: LibApp[] } {
+  const steam: LibApp[] = [];
+  const other: LibApp[] = [];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    const rawAll = w.appStore?.allApps;
+    const rawLocal = w.collectionStore?.localGamesCollection?.allApps;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const all: any[] =
+      Array.isArray(rawAll) && rawAll.length ? rawAll : Array.isArray(rawLocal) ? rawLocal : [];
+    const localIds = new Set<number>(
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (Array.isArray(rawLocal) ? rawLocal : []).map((a: any) => a?.appid)
+    );
+    for (const a of all) {
+      if (!a?.appid || !a?.display_name) continue;
+      const entry = { appid: String(a.appid), name: String(a.display_name) };
+      const isShortcut = a.app_type === APP_SHORTCUT || a.BIsShortcut?.() === true;
+      if (isShortcut) {
+        other.push(entry); // non-Steam shortcuts only exist if you added them
+        continue;
+      }
+      if (a.app_type !== APP_GAME && a.app_type !== APP_APPLICATION) continue;
+      const installed =
+        localIds.has(a.appid) ||
+        a.local_per_client_data?.installed === true ||
+        a.selected_per_client_data?.installed === true;
+      if (installed) steam.push(entry);
+    }
+  } catch (e) {
+    void logBackend(`installedApps failed: ${e}`);
+  }
+  const byName = (x: LibApp, y: LibApp) => x.name.localeCompare(y.name);
+  return { steam: steam.sort(byName), other: other.sort(byName) };
+}
+
+// ---------- cues: popup + rumble ----------
+let activeToast: ReturnType<typeof toaster.toast> | undefined;
+
+function dismissToast() {
+  try {
+    activeToast?.dismiss();
+  } catch {
+    /* ignore */
+  }
+  activeToast = undefined;
+}
+
+function showToast(body: string, duration: number) {
+  if (!current?.indicator) return;
+  dismissToast();
+  try {
+    activeToast = toaster.toast({
+      title: "Ubermoc Speech",
+      body,
+      duration,
+      playSound: false,
+      showNewIndicator: false,
+    });
+  } catch (e) {
+    void logBackend(`toast failed: ${e}`);
+  }
+}
+
+function errorToast(body: string) {
+  dismissToast();
+  toaster.toast({ title: "Ubermoc Speech", body, duration: 5000 });
+}
+
+// Rumble: tries the browser Gamepad vibration actuator (real motors) and
+// Steam's haptic pulse (trackpad haptics on a Deck). Whichever the system
+// supports will fire; others are skipped.
+function pulse(ms: number) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const pads: any[] = Array.from((navigator.getGamepads?.() ?? []) as any);
+  for (const pad of pads) {
+    try {
+      pad?.vibrationActuator?.playEffect?.("dual-rumble", {
+        startDelay: 0,
+        duration: ms,
+        weakMagnitude: 0.4,
+        strongMagnitude: 0.15,
+      });
+    } catch {
+      /* ignore */
+    }
+  }
+  const input = steamInput();
+  if (input && typeof input.TriggerHapticPulse === "function") {
+    for (let t = 0; t < ms; t += 30) {
+      setTimeout(() => {
+        try {
+          input.TriggerHapticPulse(lastController, 0, 2500);
+          input.TriggerHapticPulse(lastController, 1, 2500);
+        } catch {
+          /* ignore */
+        }
+      }, t);
+    }
+  }
+}
+
+function rumbleCue(kind: "start" | "end", force = false) {
+  if (!force && !current?.rumble) return;
+  if (kind === "start") pulse(160);
+  else {
+    pulse(90);
+    setTimeout(() => pulse(90), 220); // two short pulses = finished
+  }
+}
+
 // ---------- key output ----------
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// Which input features this Steam build actually provides (filled at load).
-const feeds = { state: false, messages: false, pad: false, keys: false, names: "" };
-
 async function tapKeys(mods: number[], code: number) {
-  const input = SteamClient?.Input;
+  const input = steamInput();
   if (typeof input?.ControllerKeyboardSetKeyState !== "function") {
-    toaster.toast({ title: "Ubermoc Speech", body: "This Steam build cannot send key presses" });
+    errorToast("This Steam build cannot send key presses");
     return;
   }
   for (const m of mods) input.ControllerKeyboardSetKeyState(m, true);
+  if (mods.length) await sleep(25);
   input.ControllerKeyboardSetKeyState(code, true);
-  await sleep(40);
+  await sleep(45);
   input.ControllerKeyboardSetKeyState(code, false);
+  if (mods.length) await sleep(25);
   for (const m of [...mods].reverse()) input.ControllerKeyboardSetKeyState(m, false);
-  await sleep(40);
+  await sleep(45);
 }
 
 async function pressSpec(k: KeySpec) {
@@ -126,68 +255,116 @@ async function pressSpec(k: KeySpec) {
 
 async function deliver(text: string, s: Settings) {
   const res = await setClipboard(text);
-  if (!res.ok) {
+  let clipboardOk = res.ok;
+  if (!clipboardOk) {
     try {
       await navigator.clipboard.writeText(text);
+      clipboardOk = true;
     } catch {
-      toaster.toast({ title: "Ubermoc Speech", body: "Could not set clipboard" });
-      return;
+      clipboardOk = false;
     }
   }
   await pressSpec(s.before_key);
-  await tapKeys([KEY_CTRL], KEY_V); // paste
-  await sleep(80);
+  if (clipboardOk) {
+    await tapKeys([KEY_CTRL], KEY_V); // paste
+    await sleep(80);
+  } else {
+    // No clipboard available: have Steam type the text directly.
+    const input = steamInput();
+    if (typeof input?.ControllerKeyboardSendText === "function") {
+      input.ControllerKeyboardSendText(text);
+      await sleep(120);
+    } else {
+      errorToast("Could not paste or type the text");
+      return;
+    }
+  }
   await pressSpec(s.after_key);
 }
 
-// ---------- hold-to-talk ----------
-async function onPress() {
-  if (!current || busy) return;
-  busy = true;
-  const r = await startRecording();
+// ---------- dictation state machine ----------
+let phase: Phase = "idle";
+const phaseSubs = new Set<(p: Phase) => void>();
+let testSink: ((r: DictResult) => void) | null = null;
+let startPending: Promise<{ ok: boolean; error?: string }> | null = null;
+
+function setPhase(p: Phase) {
+  phase = p;
+  phaseSubs.forEach((f) => f(p));
+}
+
+async function beginDictation(): Promise<void> {
+  if (!current || phase !== "idle") return;
+  setPhase("listening");
+  rumbleCue("start");
+  showToast("Listening...", 120000);
+  startPending = startRecording();
+  const r = await startPending;
+  startPending = null;
   if (!r.ok) {
-    busy = false;
-    toaster.toast({ title: "Ubermoc Speech", body: r.error ?? "Recording failed" });
+    setPhase("idle");
+    errorToast(r.error ?? "Recording failed");
   }
 }
 
-async function onRelease() {
-  if (!busy) return;
+async function endDictation(): Promise<void> {
+  if (phase !== "listening") return;
+  if (startPending) await startPending;
+  if (phase !== "listening") return;
+  setPhase("transcribing");
+  rumbleCue("end");
+  showToast("Transcribing...", 60000);
   const r = await stopAndTranscribe();
-  busy = false;
-  if (!current) return;
-  if (!r.ok || !r.text) {
-    if (r.error && r.error !== "no audio captured")
-      toaster.toast({ title: "Ubermoc Speech", body: r.error });
+  setPhase("idle");
+  const result: DictResult = { ok: !!(r.ok && r.text), text: r.text, error: r.error, at: Date.now() };
+  if (!result.ok) {
+    dismissToast();
+    if (r.error && r.error !== "no audio captured") errorToast(r.error);
+    else showToast("Didn't catch anything", 2500);
+    testSink?.(result);
     return;
   }
-  await deliver(r.text, effective(current, runningAppId()));
+  if (testSink) {
+    showToast(`Heard: ${r.text}`.slice(0, 120), 4000);
+    testSink(result);
+    return;
+  }
+  showToast(`Typing: ${r.text}`.slice(0, 120), 2500);
+  if (current) await deliver(r.text as string, effective(current, runningAppId()));
 }
 
 // ---------- input feeds ----------
 const heldIds = new Set<number>();
 let lastMask: Combo = { lower: 0, upper: 0 };
+let held = false;
 
 // While set, input is reported here instead of triggering dictation
 // (used by "Record combo").
-let captureCb: ((mask: Combo, ids: Set<number>) => void) | null = null;
+let captureCb: (() => void) | null = null;
 // Live monitor shown in the panel to help diagnose button detection.
 let monitorCb: ((text: string) => void) | null = null;
 
+function monitorText(): string {
+  return (
+    `Pressed: ${describePressed(heldIds)}   ` +
+    `[state ${lastMask.upper.toString(16)}:${lastMask.lower.toString(16)}]`
+  );
+}
+
 function evaluate() {
+  monitorCb?.(monitorText());
   if (captureCb) {
-    captureCb(lastMask, heldIds);
+    captureCb();
     return;
   }
   if (!current) return;
-  const combo = current.combo ?? DEFAULT_COMBO;
-  const down = comboHeld(lastMask, heldIds, combo);
+  const down = comboHeld(lastMask, heldIds, current.combo ?? DEFAULT_COMBO);
   if (down && !held) {
     held = true;
-    void onPress();
+    void beginDictation();
   } else if (!down && held) {
     held = false;
-    void onRelease();
+    void endDictation();
   }
 }
 
@@ -195,18 +372,22 @@ function evaluate() {
 function onControllerState(states: any[]) {
   const st = states?.[0];
   if (!st) return;
+  lastController = Number(st.unControllerIndex ?? lastController) || 0;
   lastMask = {
     lower: Number(st.ulButtons ?? 0) >>> 0,
     upper: Number(st.ulUpperButtons ?? 0) >>> 0,
   };
-  monitorCb?.(
-    `mask ${lastMask.upper.toString(16)}:${lastMask.lower.toString(16)}  ids [${[...heldIds].join(",")}]`
-  );
   evaluate();
 }
 
-// Third feed: the standard browser Gamepad API. Ids are offset by 1000 so they
-// never collide with Steam's own button ids.
+function onInputMessage(controller: number, button: number, pressed: boolean) {
+  lastController = controller;
+  if (pressed) heldIds.add(button);
+  else heldIds.delete(button);
+  evaluate();
+}
+
+// Third feed: the standard browser Gamepad API (ids offset by 1000).
 let padPrev = new Set<number>();
 function pollGamepads() {
   const pads = navigator.getGamepads?.() ?? [];
@@ -217,53 +398,45 @@ function pollGamepads() {
     });
   }
   let changed = false;
-  now.forEach((i) => { if (!padPrev.has(i)) { heldIds.add(i); changed = true; } });
-  padPrev.forEach((i) => { if (!now.has(i)) { heldIds.delete(i); changed = true; } });
+  now.forEach((i) => {
+    if (!padPrev.has(i)) {
+      heldIds.add(i);
+      changed = true;
+    }
+  });
+  padPrev.forEach((i) => {
+    if (!now.has(i)) {
+      heldIds.delete(i);
+      changed = true;
+    }
+  });
   padPrev = now;
-  if (changed) {
-    monitorCb?.(
-      `mask ${lastMask.upper.toString(16)}:${lastMask.lower.toString(16)}  ids [${[...heldIds].join(",")}]`
-    );
-    evaluate();
-  }
+  if (changed) evaluate();
 }
 
-function onInputMessage(_controller: number, button: number, pressed: boolean) {
-  if (pressed) heldIds.add(button);
-  else heldIds.delete(button);
-  monitorCb?.(
-    `mask ${lastMask.upper.toString(16)}:${lastMask.lower.toString(16)}  ids [${[...heldIds].join(",")}]`
-  );
-  evaluate();
-}
-
-// ---------- UI ----------
+// ---------- UI pieces ----------
 const MODE_OPTIONS = [
   { data: "enter", label: "Enter" },
   { data: "none", label: "None" },
-  { data: "custom", label: "Keyboard key / combination" },
+  { data: "custom", label: "Choose key / combination" },
 ];
 
-function KeyPicker(props: {
+function KeyBind(props: {
   label: string;
   value: KeySpec;
   onChange: (k: KeySpec) => void;
 }) {
   const [recording, setRecording] = useState(false);
+  const v = props.value;
 
   useEffect(() => {
     if (!recording) return;
-    const mods = new Set<number>();
     const handler = (e: KeyboardEvent) => {
+      const code = hidFromEvent(e);
+      if (code === undefined) return; // modifier on its own: wait for the key
       e.preventDefault();
       e.stopPropagation();
-      const code = hidFromEvent(e);
-      if (code === undefined) return;
-      if (MOD_CODES.has(code)) {
-        mods.add(code); // wait for the main key of the combination
-        return;
-      }
-      props.onChange({ mode: "custom", code, mods: [...mods] });
+      props.onChange({ mode: "custom", code, mods: modsFromEvent(e) });
       setRecording(false);
     };
     window.addEventListener("keydown", handler, true);
@@ -280,22 +453,47 @@ function KeyPicker(props: {
         <DropdownItem
           label={props.label}
           rgOptions={MODE_OPTIONS}
-          selectedOption={props.value.mode}
-          onChange={(o) => {
-            const mode = o.data as KeySpec["mode"];
-            props.onChange({ ...props.value, mode, code: props.value.code || KEY_ENTER });
-            if (mode === "custom") setRecording(true);
-          }}
+          selectedOption={v.mode}
+          onChange={(o) =>
+            props.onChange({
+              mode: o.data as KeySpec["mode"],
+              code: v.code || KEY_ENTER,
+              mods: v.mods ?? [],
+            })
+          }
         />
       </PanelSectionRow>
-      {props.value.mode === "custom" && (
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={() => setRecording(!recording)}>
-            {recording
-              ? "Listening for a KEYBOARD key... press it now (15s). On the Deck use Steam + X for the on-screen keyboard"
-              : `${describeKey(props.value)}  (tap to re-record)`}
-          </ButtonItem>
-        </PanelSectionRow>
+      {v.mode === "custom" && (
+        <>
+          <PanelSectionRow>
+            <DropdownItem
+              label="Hold with"
+              rgOptions={MOD_OPTIONS.map((m, i) => ({ data: i, label: m.label }))}
+              selectedOption={modsIndex(v.mods)}
+              onChange={(o) => props.onChange({ ...v, mods: MOD_OPTIONS[o.data as number].mods })}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <DropdownItem
+              label="Key"
+              rgOptions={KEY_OPTIONS.map((k) => ({ data: k.code, label: k.label }))}
+              selectedOption={v.code}
+              onChange={(o) => props.onChange({ ...v, code: o.data as number })}
+            />
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <Field label="Will press" description="Pick from the lists above, or record from a keyboard">
+              {describeKey(v)}
+            </Field>
+          </PanelSectionRow>
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => setRecording(!recording)}>
+              {recording
+                ? "Listening for a KEYBOARD key... press it now (15 s)"
+                : "Record from a keyboard (optional)"}
+            </ButtonItem>
+          </PanelSectionRow>
+        </>
       )}
     </>
   );
@@ -319,9 +517,9 @@ function OverrideEntry(props: {
       </PanelSectionRow>
       {open && (
         <>
-          <KeyPicker label="Press before typing" value={p.before_key}
+          <KeyBind label="Press before typing" value={p.before_key}
             onChange={(k) => props.onChange({ ...p, before_key: k })} />
-          <KeyPicker label="Press after typing" value={p.after_key}
+          <KeyBind label="Press after typing" value={p.after_key}
             onChange={(k) => props.onChange({ ...p, after_key: k })} />
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={props.onRemove}>
@@ -334,18 +532,24 @@ function OverrideEntry(props: {
   );
 }
 
+const sizeLabel = (mb: number) => (mb >= 1000 ? `~${(mb / 1000).toFixed(1)} GB` : `~${mb} MB`);
+
 function Panel() {
   const [settings, setLocal] = useState<Settings | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
+  const [selected, setSelected] = useState<string>("");
   const [status, setStatus] = useState<Status | null>(null);
   const [progress, setProgress] = useState<Record<string, number>>({});
   const [capturing, setCapturing] = useState(false);
   const [overridesOpen, setOverridesOpen] = useState(false);
   const [monitor, setMonitor] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
-  const [updMsg, setUpdMsg] = useState<string>("");
+  const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
+  const [phaseNow, setPhaseNow] = useState<Phase>(phase);
+  const [last, setLast] = useState<DictResult | null>(null);
+  const [testMsg, setTestMsg] = useState("");
   const appid = runningAppId();
 
   const refresh = async () => {
@@ -354,15 +558,23 @@ function Panel() {
   };
 
   useEffect(() => {
-    void getSettings().then(setLocal);
+    void getSettings().then((s) => {
+      setLocal(s);
+      setSelected(s.model);
+    });
     void refresh();
     void checkUpdate().then(setUpd);
+    phaseSubs.add(setPhaseNow);
+    // While this menu is open, dictation results show here instead of being typed.
+    testSink = setLast;
     const t = setInterval(async () => {
       setProgress(await getProgress());
       setStatus(await getStatus());
     }, 1500);
     return () => {
       clearInterval(t);
+      phaseSubs.delete(setPhaseNow);
+      testSink = null;
       monitorCb = null;
       captureCb = null;
     };
@@ -370,8 +582,9 @@ function Panel() {
 
   useEffect(() => {
     monitorCb = monitor === null ? null : setMonitor;
-    if (monitor === null) return;
-    return () => { monitorCb = null; };
+    return () => {
+      monitorCb = null;
+    };
   }, [monitor === null]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!settings) return <PanelSection title="Ubermoc Speech">Loading...</PanelSection>;
@@ -383,6 +596,14 @@ function Panel() {
     await setSettings(next);
   };
 
+  const restartServerIfRunning = async () => {
+    if (status?.running) {
+      await stopServer();
+      await startServer();
+    }
+    setStatus(await getStatus());
+  };
+
   const setProfile = (id: string, p: Profile | null) => {
     const profiles = { ...settings.profiles };
     if (p) profiles[id] = p;
@@ -392,58 +613,118 @@ function Panel() {
 
   const addOverride = (id: string, name: string) => {
     if (settings.profiles?.[id]) return;
-    return setProfile(id, {
-      name,
-      before_key: settings.before_key,
-      after_key: settings.after_key,
-    });
+    return setProfile(id, { name, before_key: settings.before_key, after_key: settings.after_key });
   };
 
+  // ----- hold-to-talk recording -----
   const recordCombo = () => {
     setCapturing(true);
-    const seen: Combo = { lower: 0, upper: 0 };
-    const seenIds = new Set<number>();
+    const seenSteam = new Set<number>();
+    const seenPad = new Set<number>();
+    const seenMask: Combo = { lower: 0, upper: 0 };
+    const baseMask = { ...lastMask };
+    let armed = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const finish = () => {
       captureCb = null;
       setCapturing(false);
-      const combo: Combo = { ...seen, ids: [...seenIds] };
+      let combo: Combo;
+      if (seenSteam.size) combo = { lower: 0, upper: 0, ids: [...seenSteam] };
+      else if (seenPad.size) combo = { lower: 0, upper: 0, ids: [...seenPad] };
+      else
+        combo = {
+          lower: seenMask.lower & ~baseMask.lower,
+          upper: seenMask.upper & ~baseMask.upper,
+          ids: [],
+        };
       if (!comboEmpty(combo)) void update({ combo });
-      else toaster.toast({ title: "Ubermoc Speech", body: "No button input detected - see 'Live input' below" });
+      else errorToast("No button input detected - turn on 'Live input' to troubleshoot");
     };
-    // Give up after 10s of silence.
-    timer = setTimeout(finish, 10000);
-    captureCb = (mask, ids) => {
-      if (!mask.lower && !mask.upper && ids.size === 0) return;
-      seen.lower |= mask.lower;
-      seen.upper |= mask.upper;
-      ids.forEach((i) => seenIds.add(i));
+    timer = setTimeout(finish, 10000); // give up after 10 s of silence
+    captureCb = () => {
+      const steam = [...heldIds].filter((i) => i < 1000 && recordableSteamId(i));
+      const pad = [...heldIds].filter((i) => i >= 1000);
+      // Wait until the button that was used to start recording is released.
+      if (!armed) {
+        if (steam.length === 0 && pad.length === 0) armed = true;
+        return;
+      }
+      if (!steam.length && !pad.length && !lastMask.lower && !lastMask.upper) return;
+      steam.forEach((i) => seenSteam.add(i));
+      pad.forEach((i) => seenPad.add(i));
+      seenMask.lower |= lastMask.lower;
+      seenMask.upper |= lastMask.upper;
       clearTimeout(timer);
       timer = setTimeout(finish, 800); // finish shortly after input settles
     };
   };
 
-  const installed = models.filter((m) => m.installed);
-  const apps = libraryApps().filter((a) => !settings.profiles?.[a.appid]);
+  // ----- models -----
+  const sel = models.find((m) => m.name === selected);
+  const downloadSelected = async () => {
+    if (!sel) return;
+    setProgress({ ...progress, [sel.name]: 0 });
+    const r = await downloadModel(sel.name);
+    if (!r.ok) errorToast(`Download failed: ${r.error ?? ""}`);
+    await refresh();
+    if (r.ok) {
+      await update({ model: sel.name }); // use the model that was just downloaded
+      if (!status?.running && settings.autostart) await startServer();
+      else await restartServerIfRunning();
+      setStatus(await getStatus());
+    }
+  };
+  const deleteSelected = async () => {
+    if (!sel) return;
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      setTimeout(() => setConfirmDelete(false), 4000);
+      return;
+    }
+    setConfirmDelete(false);
+    if (sel.name === settings.model) await stopServer();
+    await deleteModel(sel.name);
+    await refresh();
+  };
+
+  // ----- apps -----
+  const apps = installedApps();
+  const steamChoices = apps.steam.filter((a) => !settings.profiles?.[a.appid]);
+  const otherChoices = apps.other.filter((a) => !settings.profiles?.[a.appid]);
   const profileEntries = Object.entries(settings.profiles ?? {});
+
+  // ----- tests -----
+  const runKeyTest = async () => {
+    for (let i = 5; i > 0; i--) {
+      setTestMsg(`Typing in ${i}... close this menu and click a text box`);
+      await sleep(1000);
+    }
+    setTestMsg("Typing now...");
+    await deliver("Ubermoc Speech test", effective(settings, runningAppId()));
+    setTestMsg("Done. If nothing appeared, tell me what happened.");
+  };
+
+  const phaseText =
+    phaseNow === "listening" ? "Listening..." : phaseNow === "transcribing" ? "Transcribing..." : "Idle";
 
   return (
     <>
       <PanelSection title="Global">
-        <KeyPicker label="Press before typing" value={settings.before_key}
+        <KeyBind label="Press before typing" value={settings.before_key}
           onChange={(k) => update({ before_key: k })} />
-        <KeyPicker label="Press after typing" value={settings.after_key}
+        <KeyBind label="Press after typing" value={settings.after_key}
           onChange={(k) => update({ after_key: k })} />
         <PanelSectionRow>
-          <ButtonItem layout="below" onClick={recordCombo} disabled={capturing}>
+          <ButtonItem layout="below" onClick={recordCombo} disabled={capturing}
+            description="Controller buttons you hold while you talk">
             {capturing
-              ? "Listening for CONTROLLER buttons... hold them together now, then let go"
+              ? "Listening for CONTROLLER buttons... hold them together, then let go"
               : `Hold-to-talk buttons: ${describeCombo(settings.combo)}  (tap to change)`}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={() => update({ combo: DEFAULT_COMBO })}>
-            Reset hold-to-talk to R4 + R5
+            Reset hold-to-talk to the two right back buttons
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
@@ -452,7 +733,7 @@ function Panel() {
             description={
               settings.punctuation === "spoken"
                 ? 'Only types punctuation you say out loud, e.g. "comma", "period", "question mark", "new line".'
-                : "Whisper decides where punctuation goes. Saying \"period\" types the word."
+                : 'Whisper decides where punctuation goes. Saying "period" types the word.'
             }
             rgOptions={[
               { data: "auto", label: "Automatic (Whisper adds it)" },
@@ -464,10 +745,26 @@ function Panel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <ToggleField
+            label="Show popup while listening"
+            description="A Steam notification says Listening / Transcribing"
+            checked={settings.indicator}
+            onChange={(v) => update({ indicator: v })}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
+            label="Light rumble"
+            description="One pulse when listening starts, two when it ends"
+            checked={settings.rumble}
+            onChange={(v) => update({ rumble: v })}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ToggleField
             label="Live input"
             description={
               monitor ??
-              `Listening feeds - Steam state: ${feeds.state ? "yes" : "NO"}, Steam buttons: ${feeds.messages ? "yes" : "NO"}, gamepad: ${feeds.pad ? "yes" : "NO"}, key output: ${feeds.keys ? "yes" : "NO"}`
+              `Feeds - Steam buttons: ${feeds.messages ? "yes" : "NO"}, Steam state: ${feeds.state ? "yes" : "NO"}, gamepad: ${feeds.pad ? "yes" : "NO"}, key output: ${feeds.keys ? "yes" : "NO"}`
             }
             checked={monitor !== null}
             onChange={(on) => setMonitor(on ? "waiting for input..." : null)}
@@ -493,20 +790,34 @@ function Panel() {
                 </ButtonItem>
               </PanelSectionRow>
             )}
-            {apps.length > 0 && (
-              <PanelSectionRow>
-                <DropdownItem
-                  label="Add from library"
-                  rgOptions={apps.map((a) => ({ data: a.appid, label: a.name }))}
-                  selectedOption={undefined}
-                  strDefaultLabel="Choose a game or app..."
-                  onChange={(o) => {
-                    const a = apps.find((x) => x.appid === o.data);
-                    if (a) void addOverride(a.appid, a.name);
-                  }}
-                />
-              </PanelSectionRow>
-            )}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Add installed Steam game"
+                description={`${apps.steam.length} installed`}
+                disabled={steamChoices.length === 0}
+                rgOptions={steamChoices.map((a) => ({ data: a.appid, label: a.name }))}
+                selectedOption={undefined}
+                strDefaultLabel={steamChoices.length ? "Choose a game..." : "None available"}
+                onChange={(o) => {
+                  const a = steamChoices.find((x) => x.appid === o.data);
+                  if (a) void addOverride(a.appid, a.name);
+                }}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Add non-Steam game or app"
+                description={`${apps.other.length} found`}
+                disabled={otherChoices.length === 0}
+                rgOptions={otherChoices.map((a) => ({ data: a.appid, label: a.name }))}
+                selectedOption={undefined}
+                strDefaultLabel={otherChoices.length ? "Choose an app..." : "None available"}
+                onChange={(o) => {
+                  const a = otherChoices.find((x) => x.appid === o.data);
+                  if (a) void addOverride(a.appid, a.name);
+                }}
+              />
+            </PanelSectionRow>
             {profileEntries.map(([id, p]) => (
               <OverrideEntry
                 key={id}
@@ -532,7 +843,7 @@ function Panel() {
             checked={!!status?.running}
             onChange={async (on) => {
               const r = on ? await startServer() : await stopServer();
-              if (!r.ok) toaster.toast({ title: "Ubermoc Speech", body: (r as { error?: string }).error ?? "Failed" });
+              if (!r.ok) errorToast((r as { error?: string }).error ?? "Failed");
               setStatus(await getStatus());
             }}
           />
@@ -544,30 +855,130 @@ function Panel() {
             onChange={(v) => update({ autostart: v })}
           />
         </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Models">
+        {models.map((m) => (
+          <PanelSectionRow key={m.name}>
+            <ButtonItem
+              layout="below"
+              description={`${sizeLabel(m.size_mb)} - ${m.description}`}
+              onClick={() => {
+                setSelected(m.name);
+                setConfirmDelete(false);
+              }}
+            >
+              {m.name === selected ? "● " : "○ "}
+              {m.name}
+              {m.installed ? "  (installed)" : ""}
+              {m.installed && m.name === settings.model ? "  (in use)" : ""}
+            </ButtonItem>
+          </PanelSectionRow>
+        ))}
+        {sel && (
+          <>
+            {progress[sel.name] !== undefined && (
+              <PanelSectionRow>
+                <ProgressBarWithInfo
+                  label={`Downloading ${sel.name}`}
+                  nProgress={progress[sel.name] * 100}
+                  sOperationText={`${Math.round(progress[sel.name] * 100)}%`}
+                />
+              </PanelSectionRow>
+            )}
+            {!sel.installed && progress[sel.name] === undefined && (
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={downloadSelected}
+                  description="Downloaded once and kept permanently">
+                  Download {sel.name} ({sizeLabel(sel.size_mb)})
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            {sel.installed && sel.name !== settings.model && (
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  onClick={async () => {
+                    await update({ model: sel.name });
+                    await restartServerIfRunning();
+                  }}
+                >
+                  Use {sel.name}
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            {sel.installed && (
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={deleteSelected}>
+                  {confirmDelete ? `Tap again to delete ${sel.name}` : `Delete ${sel.name}`}
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+          </>
+        )}
+      </PanelSection>
+
+      <PanelSection title="Test">
         <PanelSectionRow>
-          <SliderField
-            label="CPU threads"
-            value={settings.threads}
-            min={1}
-            max={8}
-            step={1}
-            showValue
-            onChange={(v) => update({ threads: v })}
-          />
+          <Field label="Status" description="While this menu is open, dictation results appear below instead of being typed">
+            {phaseText}
+          </Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            description="Or hold your hold-to-talk buttons"
+            onClick={() => (phase === "listening" ? void endDictation() : void beginDictation())}
+            disabled={phaseNow === "transcribing"}
+          >
+            {phaseNow === "listening" ? "Stop and transcribe" : "Start test recording"}
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Field label="Last result">
+            <div style={{ whiteSpace: "pre-wrap", textAlign: "right" }}>
+              {last ? (last.ok ? last.text : `(${last.error ?? "nothing heard"})`) : "-"}
+            </div>
+          </Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" onClick={runKeyTest}
+            description={testMsg || "Presses your before key, pastes a test sentence, then your after key"}>
+            Type a test sentence in 5 seconds
+          </ButtonItem>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" description={`Haptics available: ${feeds.haptics ? "yes" : "unknown"}`}
+            onClick={() => {
+              rumbleCue("start", true);
+              setTimeout(() => rumbleCue("end", true), 800);
+              showToast("Rumble test", 2000);
+            }}>
+            Test popup and rumble
+          </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
 
       <PanelSection title="Updates">
         <PanelSectionRow>
+          <Field label="Installed version">v{upd?.installed.version ?? "..."}</Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Field label="Latest version">
+            {upd?.latest
+              ? `v${upd.latest.version}${
+                  upd.available && upd.latest.version === upd.installed.version ? " (rebuilt)" : ""
+                }`
+              : upd?.error
+                ? "unavailable"
+                : "..."}
+          </Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
           <ButtonItem
             layout="below"
             disabled={updBusy}
-            description={
-              updMsg ||
-              (upd
-                ? upd.error ?? `Installed ${upd.installed}${upd.latest ? `, latest ${upd.latest}` : ""}`
-                : "Checking...")
-            }
+            description={updMsg || (upd?.error ?? (upd?.available ? "A newer version is available" : "You are up to date"))}
             onClick={async () => {
               setUpdBusy(true);
               try {
@@ -576,7 +987,7 @@ function Panel() {
                   const r = await installUpdate();
                   setUpdMsg(
                     r.ok
-                      ? "Updated. Steam's plugin loader is restarting - reopen the panel in a few seconds."
+                      ? "Updated. Decky is restarting - reopen this menu in a few seconds."
                       : `Update failed: ${r.error ?? "unknown error"}`
                   );
                 } else {
@@ -588,70 +999,9 @@ function Panel() {
               }
             }}
           >
-            {upd?.available ? `Install update (${upd.latest})` : "Check for updates"}
+            {upd?.available ? "Install update" : "Check for updates"}
           </ButtonItem>
         </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Models">
-        {installed.length > 0 && (
-          <PanelSectionRow>
-            <DropdownItem
-              label="Active model"
-              rgOptions={installed.map((m) => ({ data: m.name, label: m.name }))}
-              selectedOption={settings.model}
-              onChange={async (o) => {
-                await update({ model: o.data as string });
-                if (status?.running) {
-                  await stopServer();
-                  await startServer();
-                }
-              }}
-            />
-          </PanelSectionRow>
-        )}
-        {models.map((m) => (
-          <PanelSectionRow key={m.name}>
-            {progress[m.name] !== undefined ? (
-              <ProgressBarWithInfo
-                label={`Downloading ${m.name}`}
-                nProgress={progress[m.name] * 100}
-                sOperationText={`${Math.round(progress[m.name] * 100)}%`}
-              />
-            ) : m.installed ? (
-              <ButtonItem
-                layout="below"
-                description={`${m.size_mb} MB - saved permanently`}
-                disabled={m.name === settings.model}
-                onClick={async () => {
-                  if (confirmDelete !== m.name) {
-                    setConfirmDelete(m.name);
-                    setTimeout(() => setConfirmDelete((c) => (c === m.name ? null : c)), 4000);
-                    return;
-                  }
-                  setConfirmDelete(null);
-                  await deleteModel(m.name);
-                  await refresh();
-                }}
-              >
-                {confirmDelete === m.name ? `Tap again to delete ${m.name}` : `${m.name} installed (delete)`}
-              </ButtonItem>
-            ) : (
-              <ButtonItem
-                layout="below"
-                description={`${m.size_mb} MB`}
-                onClick={async () => {
-                  setProgress({ ...progress, [m.name]: 0 });
-                  const r = await downloadModel(m.name);
-                  if (!r.ok) toaster.toast({ title: "Download failed", body: r.error ?? "" });
-                  await refresh();
-                }}
-              >
-                Download {m.name}
-              </ButtonItem>
-            )}
-          </PanelSectionRow>
-        ))}
       </PanelSection>
     </>
   );
@@ -686,12 +1036,11 @@ export default definePlugin(() => {
   });
   // Steam builds differ: only call input functions that actually exist, and
   // never let a missing one stop the plugin from loading.
-  const input = (typeof SteamClient !== "undefined" && SteamClient?.Input) || {};
+  const input = steamInput() ?? {};
   const names: string[] = [];
   // eslint-disable-next-line guard-for-in
-  for (const k in input) if (/Controller|Register|Key/i.test(k)) names.push(k);
-  feeds.names = names.join(",");
-  void logBackend(`SteamClient.Input functions: ${feeds.names || "(none)"}`);
+  for (const k in input) if (/Controller|Register|Key|Haptic/i.test(k)) names.push(k);
+  void logBackend(`SteamClient.Input functions: ${names.join(",") || "(none)"}`);
 
   const tryRegister = (fn: string, cb: unknown) => {
     try {
@@ -704,10 +1053,11 @@ export default definePlugin(() => {
   };
   const regState = tryRegister("RegisterForControllerStateChanges", onControllerState);
   const regMsg = tryRegister("RegisterForControllerInputMessages", onInputMessage);
-  feeds.state = typeof input.RegisterForControllerStateChanges === "function" && regState !== null;
-  feeds.messages = typeof input.RegisterForControllerInputMessages === "function" && regMsg !== null;
+  feeds.state = regState !== null;
+  feeds.messages = regMsg !== null;
   feeds.pad = typeof navigator.getGamepads === "function";
   feeds.keys = typeof input.ControllerKeyboardSetKeyState === "function";
+  feeds.haptics = typeof input.TriggerHapticPulse === "function";
   const padTimer = setInterval(pollGamepads, 30);
 
   return {
@@ -723,6 +1073,7 @@ export default definePlugin(() => {
       regState?.unregister?.();
       regMsg?.unregister?.();
       clearInterval(padTimer);
+      dismissToast();
       captureCb = null;
       monitorCb = null;
     },

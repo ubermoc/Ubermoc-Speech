@@ -29,4 +29,4 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest out/Ubermoc-Speech.zip \
             --title "Latest build" \
-            --notes "Automatic build of ${GITHUB_SHA::7}"
+            --notes "Version $(cat VERSION) build ${GITHUB_SHA::7}"

@@ -1,22 +1,46 @@
 // Controller combo matching.
 //
-// A combo can be satisfied by either of two independent Steam input feeds, and
-// "Record combo" captures both at once, so recording works even if one feed
-// does not report a given button on a particular SteamOS/Steam build:
-//   * raw state bitmasks  (SteamClient.Input.RegisterForControllerStateChanges)
-//   * button ids          (SteamClient.Input.RegisterForControllerInputMessages)
-// The default (R4 + R5) uses masks written from memory and is UNVERIFIED on
-// hardware: if it does nothing, record the combo from the panel instead.
-export const LOWER = { R5: 0x10000, L5: 0x8000 } as const;
-export const UPPER = { R4: 0x400, L4: 0x200 } as const;
-
+// A combo can be satisfied by any of three independent input feeds. "Record"
+// captures from all of them, so recording works even if one feed does not
+// report a particular button on a given Steam build:
+//   * Steam button ids   - SteamClient.Input.RegisterForControllerInputMessages
+//                          (ControllerInputGamepadButton enum, ids < 1000)
+//   * raw state bitmasks - SteamClient.Input.RegisterForControllerStateChanges
+//   * browser Gamepad API - ids offset by 1000
 export interface Combo {
   lower: number;
   upper: number;
   ids?: number[];
 }
 
-export const DEFAULT_COMBO: Combo = { lower: LOWER.R5, upper: UPPER.R4, ids: [] };
+// Right back buttons (GAMEPAD_BUTTON_RBACK = 33, GAMEPAD_BUTTON_RBACK_UPPER = 45).
+export const DEFAULT_COMBO: Combo = { lower: 0, upper: 0, ids: [33, 45] };
+
+const STEAM_NAMES: Record<number, string> = {
+  0: "A", 1: "B", 2: "X", 3: "Y",
+  4: "D-pad Up", 5: "D-pad Right", 6: "D-pad Down", 7: "D-pad Left",
+  8: "Menu", 9: "View",
+  25: "L3", 41: "R3",
+  28: "L2", 29: "R2", 30: "L1", 31: "R1",
+  32: "Left back", 33: "Right back", 44: "Left back upper", 45: "Right back upper",
+  34: "Steam", 35: "Select", 36: "Start",
+  37: "Left pad click", 38: "Left pad touch", 39: "Right pad click", 40: "Right pad touch",
+};
+const PAD_NAMES: Record<number, string> = {
+  0: "A", 1: "B", 2: "X", 3: "Y", 4: "L1", 5: "R1", 6: "L2", 7: "R2",
+  8: "View", 9: "Menu", 10: "L3", 11: "R3",
+  12: "D-pad Up", 13: "D-pad Down", 14: "D-pad Left", 15: "D-pad Right", 16: "Steam",
+};
+
+// Only these Steam ids can be part of a combo (no analog sticks/triggers/pads).
+export function recordableSteamId(id: number): boolean {
+  return id in STEAM_NAMES;
+}
+
+export function idName(id: number): string {
+  if (id >= 1000) return PAD_NAMES[id - 1000] ?? `pad ${id - 1000}`;
+  return STEAM_NAMES[id] ?? `button ${id}`;
+}
 
 export function comboEmpty(c: Combo): boolean {
   return !c.lower && !c.upper && !(c.ids && c.ids.length);
@@ -32,8 +56,7 @@ export function comboHeld(
     (combo.lower || combo.upper) &&
     (state.lower & combo.lower) === combo.lower &&
     (state.upper & combo.upper) === combo.upper;
-  // Each feed is judged on its own: the combo is held if ANY feed reports
-  // all of the buttons it recorded (ids >= 1000 come from the Gamepad API).
+  // Each feed is judged on its own: held if ANY feed reports all its buttons.
   const ids = combo.ids ?? [];
   const steam = ids.filter((i) => i < 1000);
   const pad = ids.filter((i) => i >= 1000);
@@ -43,24 +66,17 @@ export function comboHeld(
   return !!(byMask || byIds);
 }
 
-const NAMES: Array<[string, "lower" | "upper", number]> = [
-  ["R5", "lower", LOWER.R5], ["L5", "lower", LOWER.L5],
-  ["R4", "upper", UPPER.R4], ["L4", "upper", UPPER.L4],
-];
-
 export function describeCombo(c: Combo): string {
   if (comboEmpty(c)) return "Not set";
-  const parts: string[] = [];
-  let lower = c.lower;
-  let upper = c.upper;
-  for (const [name, which, bit] of NAMES) {
-    const have = which === "lower" ? lower : upper;
-    if ((have & bit) === bit) {
-      parts.push(name);
-      if (which === "lower") lower &= ~bit; else upper &= ~bit;
-    }
-  }
-  if (lower || upper) parts.push(`buttons ${upper.toString(16)}:${lower.toString(16)}`);
-  if (c.ids?.length) parts.push(`Steam ids ${c.ids.join("+")}`);
-  return parts.join(" + ");
+  const ids = c.ids ?? [];
+  const steam = ids.filter((i) => i < 1000);
+  if (steam.length) return steam.map(idName).join(" + ");
+  const pad = ids.filter((i) => i >= 1000);
+  if (pad.length) return pad.map(idName).join(" + ");
+  return `buttons ${c.upper.toString(16)}:${c.lower.toString(16)}`;
+}
+
+export function describePressed(ids: Set<number>): string {
+  const names = [...ids].filter((i) => i >= 1000 || recordableSteamId(i)).map(idName);
+  return names.length ? names.join(" + ") : "(nothing pressed)";
 }
