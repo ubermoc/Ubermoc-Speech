@@ -192,11 +192,17 @@ def sanitize_settings(data) -> dict:
     if isinstance(raw, dict):
         for appid, p in raw.items():
             if isinstance(p, dict) and isinstance(p.get("name"), str):
-                profiles[str(appid)] = {
+                prof = {
                     "name": p["name"],
                     "before_key": _key(p.get("before_key"), out["before_key"]),
                     "after_key": _key(p.get("after_key"), out["after_key"]),
                 }
+                pc = p.get("combo")
+                if isinstance(pc, dict):
+                    pids = pc.get("ids", [])
+                    pids = [i for i in pids if isinstance(i, int) and not isinstance(i, bool)] if isinstance(pids, list) else []
+                    prof["combo"] = {"lower": _int(pc.get("lower"), 0, 0), "upper": _int(pc.get("upper"), 0, 0), "ids": pids}
+                profiles[str(appid)] = prof
     out["profiles"] = profiles
     return out
 

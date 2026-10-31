@@ -6,20 +6,18 @@ Transcription is local, using a [whisper.cpp](https://github.com/ggml-org/whispe
 server (Vulkan-enabled) on `127.0.0.1:8178`.
 
 ## Features
-- Model manager: pick from a list (tiny to large, English or multilingual, full
-  or compressed), download once, switch, delete. Models are kept in
+- Model list: tap a model, then Download or Delete. Models are kept in
   `~/.local/share/ubermoc-speech/models` and never re-downloaded.
 - Hold-to-talk with any controller button combination (default: both right back
-  buttons; record your own)
-- Global "press before / after typing" keys (Enter, None, or any key with
-  modifiers) with per-game and per-app overrides (installed Steam games and
-  non-Steam shortcuts listed separately)
+  buttons; tap to record your own)
+- "Press before / after typing" keys: Enter, None, or a key / combination
+- Per-game profile toggle (its own buttons and keys for the running game)
 - Text delivery through the clipboard, then Ctrl+V (falls back to Steam typing it)
-- Punctuation: automatic (Whisper) or spoken ("period", "comma", ...)
-- Popup notification and light rumble while listening / transcribing
-- Test section: see what was heard without typing it, send a test sentence,
-  test the popup and rumble
+- Test section: shows what was heard instead of typing it
 - Update button that installs the latest GitHub release
+
+Extra features (spoken punctuation, popup + rumble, installed-game lists,
+key-press test) are kept on the `experimental-v0.01` branch.
 
 ## Install
 Build the zip and copy it to the Deck, then use Decky's developer
