@@ -1,0 +1,23 @@
+{
+  "name": "ubermoc-speech",
+  "version": "0.1.0",
+  "description": "Hold-to-talk speech-to-text for the Steam Deck, powered by whisper.cpp",
+  "type": "module",
+  "scripts": {
+    "build": "rollup -c",
+    "watch": "rollup -c -w"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@decky/api": "^1.1.2",
+    "@decky/ui": "^4.8.3",
+    "react-icons": "^5.3.0"
+  },
+  "devDependencies": {
+    "@decky/rollup": "^1.0.1",
+    "@types/react": "18.3.3",
+    "@types/react-dom": "18.3.0",
+    "rollup": "^4.22.5",
+    "typescript": "^5.6.2"
+  }
+}

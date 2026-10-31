@@ -1,0 +1,11 @@
+{
+  "name": "Ubermoc Speech",
+  "author": "ubermoc",
+  "flags": ["root"],
+  "api_version": 1,
+  "publish": {
+    "tags": ["utility", "speech", "whisper"],
+    "description": "Hold-to-talk speech-to-text for games, powered by a local Whisper server.",
+    "image": ""
+  }
+}
