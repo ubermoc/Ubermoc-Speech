@@ -51,7 +51,6 @@ MODELS = {
 }
 
 TYPE_TEST_TEXT = "Ubermoc Speech test"
-RUNNING_APP_TTL_S = 12.0   # the frontend reports every few seconds; older than this = unknown
 
 # Whisper normally encodes a full 30 s window even for a 3 s clip. Telling it the
 # real length makes short recordings much faster. Set False to turn this off.
@@ -324,6 +323,11 @@ class Plugin:
             return {"ok": False, "error": "busy"}
         if not self._selected():
             return {"ok": False, "error": "no model selected; download one and select it first"}
+        # Ask the Steam interface which app is in front now (it answers while we record).
+        try:
+            await decky.emit("query_app")
+        except Exception:
+            pass
         tool = shutil.which("parecord") or shutil.which("pw-record")
         if not tool:
             return {"ok": False, "error": "no parecord/pw-record found"}
@@ -583,9 +587,7 @@ class Plugin:
 
     def _running_appid(self) -> str:
         r = self.running_app
-        if r and time.time() - r["t"] < RUNNING_APP_TTL_S:
-            return r["appid"]
-        return ""
+        return r["appid"] if r else ""
 
     def _action_info(self, action: dict) -> dict:
         return {**action, "label": ubermoc_typing.action_label(action),

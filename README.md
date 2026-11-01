@@ -112,8 +112,8 @@ starting from a copy of the Global options' before / after; edit them with the s
 Enter / Any key or combination controls, or remove the override to go back to Global options.
 
 The running game is read from the Steam interface (`Router.MainRunningApp`) and reported to
-the backend about once a second. When the text is typed, the running app's override is used if
-it has one, otherwise Global options. A report older than 12 s is ignored. This works in
+the backend when Steam announces an app starting or stopping, and each time you start dictating (no polling). The running app's override is used if
+it has one, otherwise Global options. This works in
 gaming mode, where Steam knows what is running; in desktop mode (no Steam interface) Global
 options always apply. The non-Steam list is whatever Steam has as shortcut-type entries, so
 it can include things like remote-play shortcuts.

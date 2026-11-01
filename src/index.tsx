@@ -1038,26 +1038,34 @@ export default definePlugin(() => {
   };
   addEventListener("type_text", onTypeText);
 
-  // Tell the backend which game / app is in front, so it can pick that app's overrides.
-  let lastApp = "";
-  let lastSent = 0;
+  // Tell the backend which game / app is in front. No polling: Steam announces when an app
+  // starts or stops, and the backend asks (query_app) each time you start dictating, which
+  // also covers switching between apps that are already running.
+  let lastApp: string | null = null;
   const reportApp = () => {
     try {
       const app = Router?.MainRunningApp;
       const id = app?.appid ? String(app.appid) : "";
-      const name = id ? String(app?.display_name ?? "") : "";
-      const now = Date.now();
-      if (id !== lastApp || now - lastSent > 3000) {
+      if (id !== lastApp) {
         lastApp = id;
-        lastSent = now;
-        void setRunningApp(id, name);
+        void setRunningApp(id, id ? String(app?.display_name ?? "") : "");
       }
     } catch {
       /* Router may not exist on this Steam build */
     }
   };
+  const answerQuery = () => { lastApp = null; reportApp(); };
+  addEventListener("query_app", answerQuery);
+  let lifetime: { unregister?: () => void } | null = null;
+  try {
+    lifetime = SteamClient?.GameSessions?.RegisterForAppLifetimeNotifications?.(() => {
+      reportApp();
+      setTimeout(reportApp, 1500); // the running-app list can update just after the notification
+    }) ?? null;
+  } catch (e) {
+    void logBackend(`app lifetime feed failed: ${e}`);
+  }
   reportApp();
-  const appTimer = setInterval(reportApp, 1000);
 
   // The feed stops after the machine sleeps; a long gap between ticks means it did.
   let lastTick = Date.now();
@@ -1083,7 +1091,8 @@ export default definePlugin(() => {
     icon: <FaMicrophone />,
     onDismount() {
       clearInterval(resume);
-      clearInterval(appTimer);
+      removeEventListener("query_app", answerQuery);
+      try { lifetime?.unregister?.(); } catch { /* ignore */ }
       removeEventListener("type_text", onTypeText);
       unregister();
       uiHeld.clear();
