@@ -148,7 +148,7 @@ function Panel() {
       <PanelSection title="Current model">
         <PanelSectionRow>
           <Field label={active || "..."} description={activeInfo?.description}>
-            {ready ? "Downloaded - in use" : "Not downloaded"}
+            {ready ? null : "Not downloaded"}
           </Field>
         </PanelSectionRow>
         {downloading.map(([name, p]) => (
