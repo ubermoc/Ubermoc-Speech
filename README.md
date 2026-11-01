@@ -34,7 +34,30 @@ Valve's emulated keyboard/mouse) are held exclusively (EVIOCGRAB) so the system
 does not react to the keys pressed; the hold lasts at most ~15 s. Controllers that
 are read through raw HID cannot be held, so Steam still moves its menu with them.
 
-Settings (model, activator) are written to two places, atomically and forced to
+## Typing (into whatever has focus)
+When the activator is used, the transcription is typed into the focused field, in
+gaming mode and desktop mode (for example Steam's search box or a browser address bar).
+
+- **Virtual keyboard (default)**: the backend creates a virtual USB keyboard through
+  the kernel's `uinput` interface and presses keys on it. Events enter below the display
+  server, so they reach the focused window under gamescope and under KDE (X11 or
+  Wayland) alike. InputPlumber and Steam Button Mapper rely on the same technique on
+  SteamOS. The keyboard is created on first use and ignored by the activator reader,
+  so typed text can never trigger the activator.
+- **Steam keyboard (gaming mode only)**: asks the Steam interface to type through
+  `SteamClient.Input.ControllerKeyboardSendText`, the call Steam's own on-screen
+  keyboard uses for games. It falls back to the virtual keyboard if Steam does not answer.
+- While the panel is open the text is only shown there (so testing never types into the
+  menu). "Test typing" types a sentence after 5 seconds, wherever you click.
+- Whisper annotations such as `[BLANK_AUDIO]` are dropped, typographic quotes/dashes are
+  made plain, and line breaks are removed so nothing presses Enter.
+- Typing waits until the activator's own keys are released, so a held Ctrl cannot turn
+  it into shortcuts.
+- Limits: it types by key position (assumes a US QWERTY layout) and only plain
+  English characters; Steam's own keyboard shortcuts and games that read raw input
+  instead of text may ignore it (try the Slow speed).
+
+Settings (model, activator, typing) are written to two places, atomically and forced to
 disk: Decky's settings folder (`~/homebrew/settings/Ubermoc Speech/`) and
 `~/.local/share/ubermoc-speech/`. On load the newest copy of each setting wins and
 a damaged file is kept as `settings.json.corrupt`. The plugin log records each save

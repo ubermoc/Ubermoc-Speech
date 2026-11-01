@@ -24,6 +24,7 @@ import decky  # provided by Decky Loader
 sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 import ubermoc_input  # noqa: E402
 import ubermoc_settings  # noqa: E402
+import ubermoc_typing  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 8178
@@ -48,6 +49,10 @@ MODELS = {
     "large-v3-turbo-q5_0": (547, "All languages. Near-best accuracy, compressed."),
     "large-v3-turbo": (1624, "All languages. Best accuracy, heaviest."),
 }
+
+# Seconds between key presses when typing, by the "typing speed" setting.
+TYPE_DELAYS = {"fast": 0.003, "normal": 0.008, "slow": 0.025}
+TYPE_TEST_TEXT = "Ubermoc Speech test"
 
 # Whisper normally encodes a full 30 s window even for a 3 s clip. Telling it the
 # real length makes short recordings much faster. Set False to turn this off.
@@ -82,6 +87,10 @@ class Plugin:
     by_activator: bool = False
     act_down: bool = False
     hub = None
+    keyboard = None                # the virtual keyboard, created on first use
+    panel_seen: float = 0.0        # last time the panel polled (it is open if recent)
+    type_acks: dict = {}
+    last_typing_test: dict | None = None
 
     # ---------- lifecycle ----------
     async def _main(self):
@@ -100,6 +109,8 @@ class Plugin:
     async def _unload(self):
         if self.hub:
             self.hub.stop()
+        if self.keyboard:
+            self.keyboard.close()
         self._stop_recorder()
         await Plugin.stop_server(self)
 
@@ -359,11 +370,17 @@ class Plugin:
             return {"ok": False, "error": "not recording"}
         self.phase = "transcribing"
         by_activator = self.by_activator
+        typed = None
         try:
             result = await Plugin._finish_recording(self)
+            if by_activator and result.get("ok") and result.get("text"):
+                self.phase = "typing"
+                typed = await Plugin._deliver_text(self, result["text"])
         finally:
             self.phase = "idle"
             self.by_activator = False
+        if typed is not None:
+            result = {**result, "typed": typed}
         # A quick accidental tap of the activator shouldn't erase the last text.
         if not (by_activator and result.get("error") == "no audio captured"):
             self.last_result = {**result, "at": time.time(), "by": "activator" if by_activator else "panel"}
@@ -394,8 +411,95 @@ class Plugin:
 
     async def get_state(self) -> dict:
         """Polled by the panel: what the dictation is doing and what it last heard."""
+        self.panel_seen = time.time()          # the panel is open: results are shown there, not typed
         return {"phase": self.phase, "last": self.last_result,
                 "activator_held": bool(self.hub and self.hub.active)}
+
+    # ---------- typing the text ----------
+    async def _deliver_text(self, text: str, force: bool = False) -> dict:
+        """Type `text` into whatever has focus. Returns what happened, for the panel."""
+        s = self._load_settings()
+        if not force:
+            if not s.get("type_enabled", True):
+                return {"status": "off"}
+            if time.time() - self.panel_seen < 1.5:
+                return {"status": "panel"}      # the menu is open: show the text there instead
+        cleaned = ubermoc_typing.clean_for_typing(text)
+        if not cleaned:
+            return {"status": "empty"}
+        # Wait for the activator's own keys to be released, so a still-held Ctrl or
+        # Shift cannot turn the typing into shortcuts.
+        tokens = self.hub.activator if self.hub else []
+        deadline = time.time() + 2.0
+        while self.hub and tokens and self.hub.any_held(tokens) and time.time() < deadline:
+            await asyncio.sleep(0.02)
+        delay = TYPE_DELAYS.get(s.get("type_speed", "normal"), TYPE_DELAYS["normal"])
+        note = ""
+        if s.get("type_method") == "steam":
+            if await Plugin._type_via_steam(self, cleaned):
+                return {"status": "typed", "method": "steam", "typed": len(cleaned), "skipped": 0}
+            note = "The Steam keyboard did not answer, so the virtual keyboard was used."
+        try:
+            r = await asyncio.get_event_loop().run_in_executor(None, self._type_blocking, cleaned, delay)
+        except ubermoc_typing.KeyboardError as e:
+            decky.logger.error(f"typing failed: {e}")
+            return {"status": "error", "error": str(e)}
+        return {"status": "typed", "method": "keyboard", "note": note, **r}
+
+    def _type_blocking(self, text: str, delay: float) -> dict:
+        if self.keyboard is None:
+            self.keyboard = ubermoc_typing.VirtualKeyboard()
+        return self.keyboard.type_text(text, delay)
+
+    async def _type_via_steam(self, text: str) -> bool:
+        """Gaming mode only: ask the Steam interface (via the panel's frontend) to type."""
+        msg_id = uuid.uuid4().hex
+        fut = asyncio.get_event_loop().create_future()
+        self.type_acks[msg_id] = fut
+        try:
+            await decky.emit("type_text", {"id": msg_id, "text": text})
+            return bool(await asyncio.wait_for(fut, 1.0))
+        except Exception:  # noqa: BLE001  (no frontend answered: e.g. desktop mode)
+            return False
+        finally:
+            self.type_acks.pop(msg_id, None)
+
+    async def type_ack(self, msg_id: str, ok: bool) -> bool:
+        fut = self.type_acks.get(msg_id)
+        if fut and not fut.done():
+            fut.set_result(bool(ok))
+        return True
+
+    async def get_typing(self) -> dict:
+        s = self._load_settings()
+        available, reason = ubermoc_typing.VirtualKeyboard().check()
+        return {
+            "enabled": bool(s.get("type_enabled", True)),
+            "method": s.get("type_method") if s.get("type_method") in ("keyboard", "steam") else "keyboard",
+            "speed": s.get("type_speed") if s.get("type_speed") in TYPE_DELAYS else "normal",
+            "keyboard": {"available": available, "reason": reason},
+            "test": self.last_typing_test,
+        }
+
+    async def set_typing(self, enabled: bool, method: str, speed: str) -> dict:
+        self._save_settings(
+            type_enabled=bool(enabled),
+            type_method=method if method in ("keyboard", "steam") else "keyboard",
+            type_speed=speed if speed in TYPE_DELAYS else "normal",
+        )
+        return await Plugin.get_typing(self)
+
+    async def type_test(self, delay_s: float = 5.0) -> dict:
+        """Type a short sentence after a delay (so the user can click a text box first)."""
+        self.last_typing_test = None
+
+        async def run():
+            await asyncio.sleep(max(0.0, min(float(delay_s), 15.0)))
+            r = await Plugin._deliver_text(self, TYPE_TEST_TEXT, force=True)
+            self.last_typing_test = {**r, "at": time.time()}
+
+        asyncio.ensure_future(run())
+        return {"ok": True}
 
     # ---------- activator (hold to talk) ----------
     def _on_activator(self, active: bool):

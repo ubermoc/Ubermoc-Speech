@@ -51,6 +51,9 @@ ABS_HAT0X, ABS_HAT0Y = 0x10, 0x11
 EVENT = struct.Struct("llHHi")
 
 VENDOR_VALVE = 0x28DE
+# The plugin's own virtual keyboard (see ubermoc_typing). Never read as an activator
+# source, so the text it types can never trigger the activator.
+VIRTUAL_KEYBOARD_NAME = "Ubermoc Speech Keyboard"
 PRODUCT_STEAM_VIRTUAL_PAD = 0x11FF   # Steam's emulated "X-Box 360 pad N"
 
 # --- Valve controllers (raw HID) -----------------------------------------------
@@ -399,6 +402,10 @@ class InputHub:
     def active(self):
         return self._active
 
+    def any_held(self, tokens) -> bool:
+        """Is any of these inputs held right now?"""
+        return bool(self._held & frozenset(tokens))
+
     # ----- lifecycle -----
     def start(self):
         if self._running:
@@ -449,6 +456,8 @@ class InputHub:
             found[node] = (model, name)
         self._emulated = []
         for d in devices:
+            if d["name"] == VIRTUAL_KEYBOARD_NAME:
+                continue
             if d["vendor"] == VENDOR_VALVE and d.get("raw_kind") in ("keyboard", "mouse"):
                 self._emulated.append("input/" + d["event"])
             if not d["kind"]:

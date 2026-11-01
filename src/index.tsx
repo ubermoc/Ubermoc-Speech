@@ -1,4 +1,4 @@
-import { callable } from "@decky/api";
+import { addEventListener, callable, removeEventListener } from "@decky/api";
 import {
   ButtonItem,
   DropdownItem,
@@ -6,22 +6,35 @@ import {
   PanelSection,
   PanelSectionRow,
   ProgressBarWithInfo,
+  ToggleField,
   definePlugin,
 } from "@decky/ui";
 import { Component, ReactNode, useEffect, useRef, useState } from "react";
+import { FaMicrophone } from "react-icons/fa";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const SteamClient: any;
-import { FaMicrophone } from "react-icons/fa";
 
 // ---------- types ----------
 interface Status { binary: boolean; server: boolean; recording: boolean }
-type Phase = "idle" | "starting" | "recording" | "transcribing";
+type Phase = "idle" | "starting" | "recording" | "transcribing" | "typing";
 interface ModelInfo { name: string; size_mb: number; description: string; installed: boolean }
 interface ModelList { selected: string; models: ModelInfo[] }
 interface DlProgress { done: number; total: number }
+interface TypedInfo {
+  status: "typed" | "panel" | "off" | "empty" | "error";
+  method?: string; typed?: number; skipped?: number; note?: string; error?: string;
+}
 interface LastResult {
   ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number; by?: string;
+  typed?: TypedInfo;
+}
+interface TypingInfo {
+  enabled: boolean;
+  method: "keyboard" | "steam";
+  speed: "fast" | "normal" | "slow";
+  keyboard: { available: boolean; reason: string };
+  test: (TypedInfo & { at: number }) | null;
 }
 interface DictState { phase: Phase; last: LastResult | null; activator_held: boolean }
 interface Watching {
@@ -61,6 +74,10 @@ const captureStatus = callable<[], CaptureStatus>("capture_status");
 const cancelCapture = callable<[], boolean>("cancel_capture");
 const clearActivator = callable<[], { ok: boolean }>("clear_activator");
 const setUiPad = callable<[string[]], boolean>("set_ui_pad");
+const getTyping = callable<[], TypingInfo>("get_typing");
+const setTyping = callable<[boolean, string, string], TypingInfo>("set_typing");
+const typeTest = callable<[number], { ok: boolean }>("type_test");
+const typeAck = callable<[string, boolean], boolean>("type_ack");
 const logBackend = callable<[string], boolean>("log");
 
 // ---------- panel ----------
@@ -105,6 +122,23 @@ function uiButton(id: number, down: boolean) {
 // Remembers the model being browsed, even if the panel is rebuilt.
 let lastChoice = "";
 
+const typedText = (t?: TypedInfo | null): string => {
+  if (!t) return "";
+  switch (t.status) {
+    case "typed":
+      return (
+        `Typed ${t.typed ?? 0} characters` +
+        (t.method === "steam" ? " (Steam keyboard)" : "") +
+        (t.skipped ? `, ${t.skipped} could not be typed` : "") +
+        (t.note ? ` - ${t.note}` : "")
+      );
+    case "panel": return "Not typed: this menu was open, so the text is only shown here";
+    case "off": return "Not typed: typing is turned off";
+    case "empty": return "Nothing to type";
+    default: return `Could not type: ${t.error ?? "unknown error"}`;
+  }
+};
+
 const sizeLabel = (mb: number) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`);
 const MB = 1024 * 1024;
 interface Speed { done: number; t: number; mbps: number }
@@ -135,6 +169,8 @@ function Panel() {
   const [capturing, setCapturing] = useState(false);
   const [cap, setCap] = useState<CaptureStatus | null>(null);
   const [capMsg, setCapMsg] = useState("");
+  const [typing, setTypingInfo] = useState<TypingInfo | null>(null);
+  const [typeMsg, setTypeMsg] = useState("");
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
@@ -154,6 +190,7 @@ function Panel() {
     void refresh();
     void checkUpdate().then(setUpd);
     void getActivator().then(setAct);
+    void getTyping().then(setTypingInfo);
     const st = setInterval(async () => setDict(await getState()), 400);
     const t = setInterval(async () => {
       const p = await getProgress();
@@ -268,6 +305,23 @@ function Panel() {
     const r = await startCapture();
     if (r.ok) setCapturing(true);
     else setCapMsg(r.error ?? "Could not start listening");
+  };
+
+  const applyTyping = async (patch: Partial<Pick<TypingInfo, "enabled" | "method" | "speed">>) => {
+    const cur = typing ?? { enabled: true, method: "keyboard", speed: "normal" };
+    setTypingInfo(await setTyping(patch.enabled ?? cur.enabled, patch.method ?? cur.method, patch.speed ?? cur.speed));
+  };
+
+  const runTypingTest = async () => {
+    await typeTest(5);
+    for (let i = 5; i > 0; i--) {
+      setTypeMsg(`Close this menu and click into a text box. Typing in ${i}...`);
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    await new Promise((r) => setTimeout(r, 1200));
+    const t = await getTyping();
+    setTypingInfo(t);
+    setTypeMsg(t.test ? typedText(t.test) : "No answer from the typing test");
   };
 
   const watchText = (w?: Watching) => {
@@ -439,6 +493,63 @@ function Panel() {
         </PanelSectionRow>
       </PanelSection>
 
+      <PanelSection title="Typing">
+        <PanelSectionRow>
+          <ToggleField
+            label="Type what I say"
+            description="Types into whatever has focus, in gaming mode and desktop mode. While this menu is open the text is only shown here."
+            checked={typing?.enabled ?? true}
+            onChange={(v) => applyTyping({ enabled: v })}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Typing method"
+            description={
+              (typing?.method ?? "keyboard") === "steam"
+                ? "Uses Steam's own keyboard. Gaming mode only; falls back to the virtual keyboard if Steam does not answer."
+                : "A virtual keyboard created by the plugin. Works everywhere, including Steam's search box."
+            }
+            rgOptions={[
+              { data: "keyboard", label: "Virtual keyboard (works everywhere)" },
+              { data: "steam", label: "Steam keyboard (gaming mode only)" },
+            ]}
+            selectedOption={typing?.method ?? "keyboard"}
+            onChange={(o) => applyTyping({ method: o.data as TypingInfo["method"] })}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Typing speed"
+            description="Use Slow if a game drops letters."
+            rgOptions={[
+              { data: "fast", label: "Fast" },
+              { data: "normal", label: "Normal" },
+              { data: "slow", label: "Slow" },
+            ]}
+            selectedOption={typing?.speed ?? "normal"}
+            onChange={(o) => applyTyping({ speed: o.data as TypingInfo["speed"] })}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <Field
+            label="Virtual keyboard"
+            description="Types by key position, so it assumes a US keyboard layout and plain English characters."
+          >
+            {typing ? (typing.keyboard.available ? "Ready" : `Unavailable: ${typing.keyboard.reason}`) : "..."}
+          </Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={runTypingTest}
+            description={typeMsg || "Types a short test sentence after 5 seconds, so you can click into any text box first"}
+          >
+            Test typing
+          </ButtonItem>
+        </PanelSectionRow>
+      </PanelSection>
+
       <PanelSection title="Transcribe">
         {status && !status.binary && (
           <PanelSectionRow>
@@ -449,7 +560,7 @@ function Panel() {
           <ButtonItem
             layout="below"
             onClick={toggleRecording}
-            disabled={!ready || phase === "starting" || phase === "transcribing"}
+            disabled={!ready || phase === "starting" || phase === "transcribing" || phase === "typing"}
             description={
               startError || (!ready ? "Select a downloaded model first" : timing || undefined)
             }
@@ -459,8 +570,14 @@ function Panel() {
             {phase === "recording" &&
               (dict.activator_held ? "SPEAK NOW - release the activator to stop" : "SPEAK NOW - tap to stop")}
             {phase === "transcribing" && "Transcribing..."}
+            {phase === "typing" && "Typing..."}
           </ButtonItem>
         </PanelSectionRow>
+        {last?.typed && (
+          <PanelSectionRow>
+            <Field label="Typing">{typedText(last.typed)}</Field>
+          </PanelSectionRow>
+        )}
         <PanelSectionRow>
           <Field label="Text">
             <div style={{ whiteSpace: "pre-wrap", textAlign: "right" }}>{resultText || "-"}</div>
@@ -576,6 +693,22 @@ export default definePlugin(() => {
   };
   register();
 
+  // The backend asks the Steam interface to type (the "Steam keyboard" method).
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const onTypeText = (payload: any) => {
+    let ok = false;
+    try {
+      if (typeof input?.ControllerKeyboardSendText === "function" && typeof payload?.text === "string") {
+        input.ControllerKeyboardSendText(payload.text);
+        ok = true;
+      }
+    } catch (e) {
+      void logBackend(`ControllerKeyboardSendText failed: ${e}`);
+    }
+    void typeAck(String(payload?.id ?? ""), ok);
+  };
+  addEventListener("type_text", onTypeText);
+
   // The feed stops after the machine sleeps; a long gap between ticks means it did.
   let lastTick = Date.now();
   const resume = setInterval(() => {
@@ -600,6 +733,7 @@ export default definePlugin(() => {
     icon: <FaMicrophone />,
     onDismount() {
       clearInterval(resume);
+      removeEventListener("type_text", onTypeText);
       unregister();
       uiHeld.clear();
       if (uiHeartbeat) clearInterval(uiHeartbeat);
