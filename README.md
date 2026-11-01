@@ -4,9 +4,31 @@ A [Decky Loader](https://decky.xyz) plugin that records from the microphone and
 transcribes it to text with a local [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 server.
 
-Current state: a fresh start. The panel has a Transcribe section (download the
-model once, record, see the text) and an Updates section that installs the
-latest GitHub release.
+Panel sections: Current model, Choose a model (download / delete), Activator,
+Transcribe, Updates (installs the latest GitHub release).
+
+## Activator (hold to talk)
+Hold the activator to record, release to transcribe. It can be keyboard keys,
+mouse buttons or controller buttons, alone or in any combination (for example
+`Left Ctrl + F9`, `Mouse side button`, `R4 + R5`, or `Left Ctrl + R4`).
+
+It is read by the plugin backend, not the panel, so it keeps working while a game
+has focus. Reading is passive (nothing is grabbed or sent to any device).
+- keyboards / mice / generic gamepads: `/dev/input/event*`
+- Steam Deck built-in controller: raw HID reports from `/dev/hidraw*`
+  (the Steam client stops delivering controller buttons to plugins while a game
+  has focus, and the kernel removes the Deck's evdev gamepad while Steam holds
+  the device). Button layout cross-checked against the Linux `hid-steam` driver
+  and SDL's Steam Deck driver (see `tests/test_input.py`).
+- Valve's emulated keyboard / mouse are ignored.
+
+Privacy: devices are opened only while an activator is set or being recorded;
+no key or button is logged, and only the activator you choose is stored.
+
+Not supported as activators: analog sticks, analog triggers, trackpads, touch.
+
+Tests: `python3 -m unittest discover -s tests -v`. Key names are generated from the
+kernel header by `scripts/gen_codes.py`.
 
 ## Install
 ```

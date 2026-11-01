@@ -13,9 +13,17 @@ import { FaMicrophone } from "react-icons/fa";
 
 // ---------- types ----------
 interface Status { binary: boolean; server: boolean; recording: boolean }
+type Phase = "idle" | "starting" | "recording" | "transcribing";
 interface ModelInfo { name: string; size_mb: number; description: string; installed: boolean }
 interface ModelList { selected: string; models: ModelInfo[] }
 interface DlProgress { done: number; total: number }
+interface LastResult {
+  ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number; by?: string;
+}
+interface DictState { phase: Phase; last: LastResult | null; activator_held: boolean }
+interface Watching { running: boolean; keyboards: number; mice: number; pads: number; deck: boolean; unreadable: number }
+interface ActivatorInfo { tokens: string[]; label: string; warnings: string[]; watching: Watching }
+interface CaptureStatus { state: "idle" | "active" | "done" | "timeout" | "cancelled"; tokens: string[]; label: string; warnings?: string[] }
 interface BuildInfo { version: string; build: string }
 interface UpdateInfo {
   ok: boolean;
@@ -40,10 +48,15 @@ const stopAndTranscribe = callable<
 >("stop_and_transcribe");
 const checkUpdate = callable<[], UpdateInfo>("check_update");
 const installUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("install_update");
+const getState = callable<[], DictState>("get_state");
+const getActivator = callable<[], ActivatorInfo>("get_activator");
+const startCapture = callable<[], { ok: boolean; error?: string }>("start_capture");
+const captureStatus = callable<[], CaptureStatus>("capture_status");
+const cancelCapture = callable<[], boolean>("cancel_capture");
+const clearActivator = callable<[], { ok: boolean }>("clear_activator");
 const logBackend = callable<[string], boolean>("log");
 
 // ---------- panel ----------
-type Phase = "idle" | "starting" | "recording" | "transcribing";
 
 // Remembers the model being browsed, even if the panel is rebuilt.
 let lastChoice = "";
@@ -72,9 +85,12 @@ function Panel() {
   const [speeds, setSpeeds] = useState<Record<string, number>>({});
   const [dlError, setDlError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [phase, setPhase] = useState<Phase>("idle");
-  const [result, setResult] = useState("");
-  const [timing, setTiming] = useState("");
+  const [dict, setDict] = useState<DictState>({ phase: "idle", last: null, activator_held: false });
+  const [startError, setStartError] = useState("");
+  const [act, setAct] = useState<ActivatorInfo | null>(null);
+  const [capturing, setCapturing] = useState(false);
+  const [cap, setCap] = useState<CaptureStatus | null>(null);
+  const [capMsg, setCapMsg] = useState("");
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
@@ -93,6 +109,8 @@ function Panel() {
     void logBackend("panel mounted");
     void refresh();
     void checkUpdate().then(setUpd);
+    void getActivator().then(setAct);
+    const st = setInterval(async () => setDict(await getState()), 400);
     const t = setInterval(async () => {
       const p = await getProgress();
       setProgress(p);
@@ -116,8 +134,31 @@ function Panel() {
       if (wasDownloading.current && !busy) void refresh(); // a download just finished
       wasDownloading.current = busy;
     }, 500);
-    return () => clearInterval(t);
+    return () => {
+      clearInterval(t);
+      clearInterval(st);
+    };
   }, []);
+
+  // While recording an activator, follow what the backend hears.
+  useEffect(() => {
+    if (!capturing) return;
+    const t = setInterval(async () => {
+      const c = await captureStatus();
+      setCap(c);
+      setAct(await getActivator());
+      if (c.state !== "active") {
+        setCapturing(false);
+        setCapMsg(
+          c.state === "done" ? `Saved: ${c.label}`
+          : c.state === "timeout" ? "Nothing was pressed - try again"
+          : "Cancelled"
+        );
+        setAct(await getActivator());
+      }
+    }, 300);
+    return () => clearInterval(t);
+  }, [capturing]);
 
   const downloaded = models.filter((m) => m.installed);
   const chosen = models.find((m) => m.name === choice);
@@ -156,30 +197,44 @@ function Panel() {
     await refresh();
   };
 
+  const phase = dict.phase;
+  const last = dict.last;
+  const resultText = last ? (last.ok ? last.text || "(nothing heard)" : last.error ?? "Transcription failed") : "";
+  const timing =
+    last?.ok && last.transcribe_s !== undefined
+      ? `${last.by === "activator" ? "Heard via the activator" : "Heard"} - text ready ${(
+          (last.wait_s ?? 0) + (last.transcribe_s ?? 0)
+        ).toFixed(1)} s after you stopped`
+      : "";
+
   const toggleRecording = async () => {
+    setStartError("");
     if (phase === "idle") {
-      setPhase("starting");
-      setResult("");
-      setTiming("");
       const r = await startRecording();
-      if (r.ok) {
-        setTiming(`Microphone ready after ${(r.ready_s ?? 0).toFixed(1)} s`);
-        setPhase("recording");
-      } else {
-        setResult(r.error ?? "Could not start recording");
-        setPhase("idle");
-      }
-      return;
+      if (!r.ok) setStartError(r.error ?? "Could not start recording");
+    } else if (phase === "recording") {
+      await stopAndTranscribe();
     }
-    if (phase === "recording") {
-      setPhase("transcribing");
-      const r = await stopAndTranscribe();
-      setPhase("idle");
-      if (r.ok) {
-        setResult(r.text || "(nothing heard)");
-        setTiming((t) => `${t} - text ready ${((r.wait_s ?? 0) + (r.transcribe_s ?? 0)).toFixed(1)} s after you stopped`);
-      } else setResult(r.error ?? "Transcription failed");
-    }
+    setDict(await getState());
+  };
+
+  const beginCapture = async () => {
+    setCapMsg("");
+    setCap(null);
+    const r = await startCapture();
+    if (r.ok) setCapturing(true);
+    else setCapMsg(r.error ?? "Could not start listening");
+  };
+
+  const watchText = (w?: Watching) => {
+    if (!w || !w.running) return "Not reading any devices (no activator set)";
+    const parts: string[] = [];
+    if (w.deck) parts.push("Steam Deck controller");
+    if (w.keyboards) parts.push(`${w.keyboards} keyboard${w.keyboards > 1 ? "s" : ""}`);
+    if (w.mice) parts.push(w.mice > 1 ? `${w.mice} mice` : "1 mouse");
+    if (w.pads) parts.push(`${w.pads} controller${w.pads > 1 ? "s" : ""}`);
+    const text = parts.length ? parts.join(", ") : "no devices found";
+    return w.unreadable ? `${text} (${w.unreadable} could not be opened)` : text;
   };
 
   return (
@@ -272,6 +327,67 @@ function Panel() {
         )}
       </PanelSection>
 
+      <PanelSection title="Activator">
+        <PanelSectionRow>
+          <Field
+            label="Hold to talk"
+            description="Hold it to record, release to transcribe. Keyboard keys, mouse buttons and controller buttons all work, alone or as a combination."
+          >
+            {act?.label || "Not set"}
+          </Field>
+        </PanelSectionRow>
+        {capturing ? (
+          <>
+            <PanelSectionRow>
+              <Field
+                label="Listening..."
+                description="Press and hold your keys or buttons together, then let go. Works for keyboard, mouse and controller."
+              >
+                {cap?.label || "waiting for input"}
+              </Field>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={() => cancelCapture()}>
+                Cancel
+              </ButtonItem>
+            </PanelSectionRow>
+          </>
+        ) : (
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={beginCapture} description={capMsg || undefined}>
+              {act?.label ? "Change activator" : "Set activator"}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {!capturing && act?.label && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={async () => {
+                await clearActivator();
+                setCapMsg("");
+                setAct(await getActivator());
+              }}
+            >
+              Clear activator
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {(act?.warnings ?? []).map((w) => (
+          <PanelSectionRow key={w}>
+            <Field label="Note">{w}</Field>
+          </PanelSectionRow>
+        ))}
+        <PanelSectionRow>
+          <Field
+            label="Reading"
+            description="Devices are only read while an activator is set or being recorded. Nothing is logged or stored except the activator you choose."
+          >
+            {watchText(act?.watching)}
+          </Field>
+        </PanelSectionRow>
+      </PanelSection>
+
       <PanelSection title="Transcribe">
         {status && !status.binary && (
           <PanelSectionRow>
@@ -283,17 +399,20 @@ function Panel() {
             layout="below"
             onClick={toggleRecording}
             disabled={!ready || phase === "starting" || phase === "transcribing"}
-            description={!ready ? "Select a downloaded model first" : timing || undefined}
+            description={
+              startError || (!ready ? "Select a downloaded model first" : timing || undefined)
+            }
           >
             {phase === "idle" && "Start recording"}
             {phase === "starting" && "Starting microphone... wait"}
-            {phase === "recording" && "SPEAK NOW - tap to stop"}
+            {phase === "recording" &&
+              (dict.activator_held ? "SPEAK NOW - release the activator to stop" : "SPEAK NOW - tap to stop")}
             {phase === "transcribing" && "Transcribing..."}
           </ButtonItem>
         </PanelSectionRow>
         <PanelSectionRow>
           <Field label="Text">
-            <div style={{ whiteSpace: "pre-wrap", textAlign: "right" }}>{result || "-"}</div>
+            <div style={{ whiteSpace: "pre-wrap", textAlign: "right" }}>{resultText || "-"}</div>
           </Field>
         </PanelSectionRow>
       </PanelSection>

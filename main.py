@@ -11,6 +11,7 @@ import signal
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
@@ -18,6 +19,10 @@ import uuid
 import zipfile
 
 import decky  # provided by Decky Loader
+
+# Decky already puts <plugin>/py_modules on sys.path; do it explicitly as well.
+sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
+import ubermoc_input  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 8178
@@ -70,14 +75,27 @@ class Plugin:
     record_path: str | None = None
     download_progress: dict = {}
     cancel_flags: set = set()
+    # dictation state, shared by the panel button and the activator
+    phase: str = "idle"            # idle | starting | recording | transcribing
+    last_result: dict | None = None
+    by_activator: bool = False
+    act_down: bool = False
+    hub = None
 
     # ---------- lifecycle ----------
     async def _main(self):
         os.makedirs(self._data_dir(), exist_ok=True)
         os.makedirs(self._models_dir(), exist_ok=True)
+        self.hub = ubermoc_input.InputHub(
+            asyncio.get_event_loop(), lambda active: Plugin._on_activator(self, active))
+        tokens = ubermoc_input.valid_tokens(self._load_settings().get("activator"))
+        if tokens:
+            self.hub.set_activator(tokens)
         decky.logger.info("Ubermoc Speech loaded")
 
     async def _unload(self):
+        if self.hub:
+            self.hub.stop()
         self._stop_recorder()
         await Plugin.stop_server(self)
 
@@ -103,15 +121,31 @@ class Plugin:
             return False
         return os.path.getsize(path) > MODELS[name][0] * 1024 * 1024 * 0.6
 
+    def _settings_path(self) -> str:
+        return os.path.join(self._data_dir(), "settings.json")
+
+    def _load_settings(self) -> dict:
+        try:
+            with open(self._settings_path()) as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def _save_settings(self, **patch):
+        """Merge into settings.json (so saving one setting never drops another)."""
+        data = self._load_settings()
+        data.update(patch)
+        tmp = self._settings_path() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, self._settings_path())
+
     def _selected(self) -> str:
         """The model in use. Always a downloaded one, or "" if none is."""
-        try:
-            with open(os.path.join(self._data_dir(), "settings.json")) as f:
-                name = json.load(f).get("model")
-            if name in MODELS and self._model_ok(name):
-                return name
-        except (OSError, ValueError, AttributeError):
-            pass
+        name = self._load_settings().get("model")
+        if name in MODELS and self._model_ok(name):
+            return name
         return DEFAULT_MODEL if self._model_ok(DEFAULT_MODEL) else ""
 
     def _user_uid(self) -> int:
@@ -138,8 +172,7 @@ class Plugin:
         return {"ok": True}
 
     def _save_selected(self, name: str):
-        with open(os.path.join(self._data_dir(), "settings.json"), "w") as f:
-            json.dump({"model": name}, f)
+        self._save_settings(model=name)
 
     async def download_model(self, name: str) -> dict:
         """Download a model. It becomes the current model only when the user selects it."""
@@ -268,11 +301,16 @@ class Plugin:
     async def start_recording(self) -> dict:
         """Returns only once audio is actually being captured, so the panel can
         say "speak now" at the right moment."""
-        if self.record_proc and self.record_proc.poll() is None:
+        if self.phase == "recording":
             return {"ok": True, "ready_s": 0.0}
+        if self.phase != "idle":
+            return {"ok": False, "error": "busy"}
+        if not self._selected():
+            return {"ok": False, "error": "no model selected; download one and select it first"}
         tool = shutil.which("parecord") or shutil.which("pw-record")
         if not tool:
             return {"ok": False, "error": "no parecord/pw-record found"}
+        self.phase = "starting"
         path = f"/tmp/ubermoc-speech-{uuid.uuid4().hex}.wav"
         if os.path.basename(tool) == "parecord":
             cmd = [tool, "--file-format=wav", "--rate=16000", "--channels=1", "--latency-msec=20", path]
@@ -281,7 +319,11 @@ class Plugin:
         runtime = f"/run/user/{self._user_uid()}"
         env = {**os.environ, "XDG_RUNTIME_DIR": runtime, "PULSE_SERVER": f"unix:{runtime}/pulse/native"}
         t0 = time.time()
-        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError as e:
+            self.phase = "idle"
+            return {"ok": False, "error": f"could not start the recorder: {e}"}
         self.record_proc, self.record_path = proc, path
 
         # Load the model while the user talks, so it is ready when they stop.
@@ -292,11 +334,13 @@ class Plugin:
         while time.time() - t0 < 5:
             if proc.poll() is not None:
                 self.record_proc = None
+                self.phase = "idle"
                 return {"ok": False, "error": "the microphone recorder stopped; is a microphone available?"}
             if os.path.exists(path) and os.path.getsize(path) > 64:
-                return {"ok": True, "ready_s": round(time.time() - t0, 2)}
+                break
             await asyncio.sleep(0.02)
-        return {"ok": True, "ready_s": round(time.time() - t0, 2)}  # recording, but slow to start
+        self.phase = "recording"
+        return {"ok": True, "ready_s": round(time.time() - t0, 2)}
 
     def _stop_recorder(self):
         proc = self.record_proc
@@ -309,6 +353,21 @@ class Plugin:
         self.record_proc = None
 
     async def stop_and_transcribe(self) -> dict:
+        if self.phase != "recording":
+            return {"ok": False, "error": "not recording"}
+        self.phase = "transcribing"
+        by_activator = self.by_activator
+        try:
+            result = await Plugin._finish_recording(self)
+        finally:
+            self.phase = "idle"
+            self.by_activator = False
+        # A quick accidental tap of the activator shouldn't erase the last text.
+        if not (by_activator and result.get("error") == "no audio captured"):
+            self.last_result = {**result, "at": time.time(), "by": "activator" if by_activator else "panel"}
+        return result
+
+    async def _finish_recording(self) -> dict:
         path = self.record_path
         self._stop_recorder()
         if not path or not os.path.exists(path) or os.path.getsize(path) < 2000:
@@ -330,6 +389,86 @@ class Plugin:
                 pass
         t2 = time.time()
         return {"ok": True, "text": text, "wait_s": round(t1 - t0, 2), "transcribe_s": round(t2 - t1, 2)}
+
+    async def get_state(self) -> dict:
+        """Polled by the panel: what the dictation is doing and what it last heard."""
+        return {"phase": self.phase, "last": self.last_result,
+                "activator_held": bool(self.hub and self.hub.active)}
+
+    # ---------- activator (hold to talk) ----------
+    def _on_activator(self, active: bool):
+        """Called by the input hub, on the event loop, when the activator is
+        pressed (True) or released (False)."""
+        self.act_down = active
+        asyncio.ensure_future(Plugin._act_press(self) if active else Plugin._act_release(self))
+
+    async def _act_press(self):
+        if self.phase != "idle":
+            return
+        self.by_activator = True
+        r = await Plugin.start_recording(self)
+        if not r.get("ok"):
+            self.by_activator = False
+            self.last_result = {"ok": False, "error": r.get("error", "could not start"),
+                                "at": time.time(), "by": "activator"}
+            return
+        if not self.act_down:           # let go while the microphone was still starting: discard
+            await Plugin._discard_recording(self)
+
+    async def _discard_recording(self):
+        path = self.record_path
+        self._stop_recorder()
+        if path:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        self.phase = "idle"
+        self.by_activator = False
+
+    async def _act_release(self):
+        if self.phase == "recording" and self.by_activator:
+            await Plugin.stop_and_transcribe(self)
+
+    def _tokens(self) -> list:
+        return ubermoc_input.valid_tokens(self._load_settings().get("activator"))
+
+    async def get_activator(self) -> dict:
+        tokens = self._tokens()
+        return {
+            "tokens": tokens,
+            "label": ubermoc_input.describe(tokens) if tokens else "",
+            "warnings": ubermoc_input.warnings_for(tokens),
+            "watching": self.hub.status() if self.hub else {},
+        }
+
+    async def start_capture(self) -> dict:
+        """Listen for the next combination the user holds and releases."""
+        if not self.hub:
+            return {"ok": False, "error": "input is not available"}
+        self.hub.begin_capture(timeout=15.0, on_done=lambda toks: Plugin._captured(self, toks))
+        return {"ok": True}
+
+    def _captured(self, tokens: list):
+        if tokens:
+            self._save_settings(activator=tokens)
+            self.hub.set_activator(tokens)
+
+    async def capture_status(self) -> dict:
+        st = self.hub.capture_status() if self.hub else {"state": "idle", "tokens": [], "label": ""}
+        st["warnings"] = ubermoc_input.warnings_for(st["tokens"]) if st["state"] == "done" else []
+        return st
+
+    async def cancel_capture(self) -> bool:
+        if self.hub:
+            self.hub.cancel_capture()
+        return True
+
+    async def clear_activator(self) -> dict:
+        self._save_settings(activator=[])
+        if self.hub:
+            self.hub.set_activator([])
+        return {"ok": True}
 
     def _transcribe(self, path: str) -> str:
         fields = {"response_format": "json", "temperature": "0.0", "language": "en"}

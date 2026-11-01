@@ -6,6 +6,6 @@ pnpm install --frozen-lockfile
 pnpm build
 rm -rf out && mkdir -p "out/Ubermoc Speech"
 git rev-parse --short=7 HEAD > "out/Ubermoc Speech/BUILD"
-cp -r dist bin main.py plugin.json package.json LICENSE VERSION "out/Ubermoc Speech/"
+cp -r dist bin py_modules main.py plugin.json package.json LICENSE VERSION "out/Ubermoc Speech/"
 (cd out && zip -qr "Ubermoc Speech.zip" "Ubermoc Speech")
 ls -la "out/Ubermoc Speech.zip"
