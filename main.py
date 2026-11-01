@@ -24,9 +24,29 @@ PORT = 8178
 REPO = "ubermoc/Ubermoc-Speech"
 RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
-MODEL_NAME = "base.en"
-MODEL_MB = 142
-MODEL_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
+MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+DEFAULT_MODEL = "base.en"
+# name -> (approx size in MB, description). The file is ggml-<name>.bin.
+MODELS = {
+    "tiny.en": (75, "English only. Fastest, least accurate."),
+    "base.en": (142, "English only. Fast, good for short phrases."),
+    "base.en-q5_1": (57, "English only. Compressed base, smaller and a bit faster."),
+    "small.en": (466, "English only. Accurate, a good balance."),
+    "small.en-q5_1": (181, "English only. Compressed small."),
+    "medium.en": (1533, "English only. Very accurate but slow on handhelds."),
+    "medium.en-q5_0": (514, "English only. Compressed medium."),
+    "tiny": (75, "All languages. Fastest, least accurate."),
+    "base": (142, "All languages. Fast."),
+    "small": (466, "All languages. Accurate."),
+    "medium": (1533, "All languages. Very accurate but slow."),
+    "large-v3-turbo-q5_0": (547, "All languages. Near-best accuracy, compressed."),
+    "large-v3-turbo": (1624, "All languages. Best accuracy, heaviest."),
+}
+
+# Whisper normally encodes a full 30 s window even for a 3 s clip. Telling it the
+# real length makes short recordings much faster. Set False to turn this off.
+SHORT_AUDIO_CONTEXT = True
+WAV_BYTES_PER_SECOND = 32000  # 16 kHz, mono, 16-bit
 
 CA_CANDIDATES = [
     "/etc/ssl/certs/ca-certificates.crt",
@@ -45,12 +65,14 @@ def _ssl_context() -> ssl.SSLContext:
 
 class Plugin:
     server_proc: subprocess.Popen | None = None
+    server_task: "asyncio.Future | None" = None
     record_proc: subprocess.Popen | None = None
     record_path: str | None = None
-    download_progress: float | None = None
+    download_progress: dict = {}
 
     # ---------- lifecycle ----------
     async def _main(self):
+        os.makedirs(self._data_dir(), exist_ok=True)
         os.makedirs(self._models_dir(), exist_ok=True)
         decky.logger.info("Ubermoc Speech loaded")
 
@@ -62,18 +84,33 @@ class Plugin:
         decky.logger.info(f"[ui] {message}")
         return True
 
-    # ---------- paths ----------
-    def _models_dir(self) -> str:
+    # ---------- paths / settings ----------
+    def _data_dir(self) -> str:
         # Outside the plugin folder so updates and reinstalls never delete it.
         home = getattr(decky, "DECKY_USER_HOME", "/home/deck")
-        return os.path.join(home, ".local", "share", "ubermoc-speech", "models")
+        return os.path.join(home, ".local", "share", "ubermoc-speech")
 
-    def _model_path(self) -> str:
-        return os.path.join(self._models_dir(), f"ggml-{MODEL_NAME}.bin")
+    def _models_dir(self) -> str:
+        return os.path.join(self._data_dir(), "models")
 
-    def _model_ok(self) -> bool:
-        path = self._model_path()
-        return os.path.exists(path) and os.path.getsize(path) > MODEL_MB * 1024 * 1024 * 0.9
+    def _model_path(self, name: str) -> str:
+        return os.path.join(self._models_dir(), f"ggml-{name}.bin")
+
+    def _model_ok(self, name: str) -> bool:
+        path = self._model_path(name)
+        if name not in MODELS or not os.path.exists(path):
+            return False
+        return os.path.getsize(path) > MODELS[name][0] * 1024 * 1024 * 0.6
+
+    def _selected(self) -> str:
+        try:
+            with open(os.path.join(self._data_dir(), "settings.json")) as f:
+                name = json.load(f).get("model")
+            if name in MODELS:
+                return name
+        except (OSError, ValueError, AttributeError):
+            pass
+        return DEFAULT_MODEL
 
     def _user_uid(self) -> int:
         try:
@@ -81,20 +118,40 @@ class Plugin:
         except OSError:
             return 1000
 
-    # ---------- model ----------
-    async def download_model(self) -> dict:
-        if self._model_ok():
+    # ---------- models ----------
+    async def list_models(self) -> dict:
+        return {
+            "selected": self._selected(),
+            "models": [
+                {"name": n, "size_mb": mb, "description": d, "installed": self._model_ok(n)}
+                for n, (mb, d) in MODELS.items()
+            ],
+        }
+
+    async def set_model(self, name: str) -> dict:
+        if name not in MODELS or not self._model_ok(name):
+            return {"ok": False, "error": "model is not downloaded"}
+        with open(os.path.join(self._data_dir(), "settings.json"), "w") as f:
+            json.dump({"model": name}, f)
+        await Plugin.stop_server(self)  # restarts with the new model on next use
+        return {"ok": True}
+
+    async def download_model(self, name: str) -> dict:
+        if name not in MODELS:
+            return {"ok": False, "error": "unknown model"}
+        if self._model_ok(name):
             return {"ok": True}
-        dest = self._model_path()
+        dest = self._model_path(name)
         tmp = dest + ".part"
-        self.download_progress = 0.0
+        url = f"{MODEL_BASE_URL}/ggml-{name}.bin"
+        self.download_progress[name] = 0.0
 
         def work():
             have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
             headers = {"User-Agent": "ubermoc-speech"}
             if have:
                 headers["Range"] = f"bytes={have}-"
-            req = urllib.request.Request(MODEL_URL, headers=headers)
+            req = urllib.request.Request(url, headers=headers)
             with urllib.request.urlopen(req, context=_ssl_context(), timeout=60) as r:
                 resumed = r.status == 206
                 if have and not resumed:
@@ -106,7 +163,7 @@ class Plugin:
                         out.write(chunk)
                         done += len(chunk)
                         if total:
-                            self.download_progress = done / total
+                            self.download_progress[name] = done / total
             if total and os.path.getsize(tmp) != total:
                 raise IOError("download incomplete; tap download again to resume")
             os.replace(tmp, dest)
@@ -115,41 +172,41 @@ class Plugin:
             await asyncio.get_event_loop().run_in_executor(None, work)
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"download failed: {e}")
-            self.download_progress = None
+            self.download_progress.pop(name, None)
             return {"ok": False, "error": str(e)}
-        self.download_progress = None
+        self.download_progress.pop(name, None)
         return {"ok": True}
 
-    async def get_download_progress(self):
+    async def get_download_progress(self) -> dict:
         return self.download_progress
 
     async def status(self) -> dict:
         binary = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "whisper-server")
         return {
-            "model": self._model_ok(),
             "binary": os.path.exists(binary),
             "server": bool(self.server_proc and self.server_proc.poll() is None),
             "recording": bool(self.record_proc and self.record_proc.poll() is None),
         }
 
-    # ---------- whisper server (started on first use) ----------
+    # ---------- whisper server ----------
     async def start_server(self) -> dict:
         if self.server_proc and self.server_proc.poll() is None:
             return {"ok": True}
-        if not self._model_ok():
-            return {"ok": False, "error": "model not downloaded"}
+        name = self._selected()
+        if not self._model_ok(name):
+            return {"ok": False, "error": f"model {name} is not downloaded"}
         binary = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "whisper-server")
         if not os.path.exists(binary):
             return {"ok": False, "error": "whisper-server binary missing"}
         os.chmod(binary, 0o755)
         env = {**os.environ, "LD_LIBRARY_PATH": os.path.dirname(binary)}
-        cmd = [binary, "-m", self._model_path(), "--host", HOST, "--port", str(PORT),
-               "-t", str(min(4, os.cpu_count() or 4))]
+        # -bo 1 / -nf: skip extra decoding passes, which only slow short phrases down.
+        cmd = [binary, "-m", self._model_path(name), "--host", HOST, "--port", str(PORT),
+               "-t", str(min(4, os.cpu_count() or 4)), "-bo", "1", "-nf", "-nt"]
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
         log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "whisper-server.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
-        # wait until it accepts connections (model load takes a few seconds)
-        deadline = time.time() + 90
+        deadline = time.time() + 90  # model load takes a few seconds
         while time.time() < deadline:
             if self.server_proc.poll() is not None:
                 return {"ok": False, "error": "whisper-server exited; see its log"}
@@ -157,7 +214,7 @@ class Plugin:
                 with socket.create_connection((HOST, PORT), timeout=1):
                     return {"ok": True}
             except OSError:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
         return {"ok": False, "error": "whisper-server did not start in time"}
 
     async def stop_server(self) -> dict:
@@ -169,26 +226,42 @@ class Plugin:
             except subprocess.TimeoutExpired:
                 proc.kill()
         self.server_proc = None
+        self.server_task = None
         return {"ok": True}
 
     # ---------- recording + transcription ----------
     async def start_recording(self) -> dict:
+        """Returns only once audio is actually being captured, so the panel can
+        say "speak now" at the right moment."""
         if self.record_proc and self.record_proc.poll() is None:
-            return {"ok": True}
+            return {"ok": True, "ready_s": 0.0}
         tool = shutil.which("parecord") or shutil.which("pw-record")
         if not tool:
             return {"ok": False, "error": "no parecord/pw-record found"}
-        self.record_path = f"/tmp/ubermoc-speech-{uuid.uuid4().hex}.wav"
+        path = f"/tmp/ubermoc-speech-{uuid.uuid4().hex}.wav"
         if os.path.basename(tool) == "parecord":
-            cmd = [tool, "--file-format=wav", "--rate=16000", "--channels=1", self.record_path]
+            cmd = [tool, "--file-format=wav", "--rate=16000", "--channels=1", "--latency-msec=20", path]
         else:
-            cmd = [tool, "--rate", "16000", "--channels", "1", self.record_path]
+            cmd = [tool, "--rate", "16000", "--channels", "1", "--latency", "20ms", path]
         runtime = f"/run/user/{self._user_uid()}"
         env = {**os.environ, "XDG_RUNTIME_DIR": runtime, "PULSE_SERVER": f"unix:{runtime}/pulse/native"}
-        self.record_proc = subprocess.Popen(
-            cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        return {"ok": True}
+        t0 = time.time()
+        proc = subprocess.Popen(cmd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.record_proc, self.record_path = proc, path
+
+        # Load the model while the user talks, so it is ready when they stop.
+        if not (self.server_proc and self.server_proc.poll() is None):
+            self.server_task = asyncio.ensure_future(Plugin.start_server(self))
+
+        # Wait until the WAV file starts growing past its 44-byte header.
+        while time.time() - t0 < 5:
+            if proc.poll() is not None:
+                self.record_proc = None
+                return {"ok": False, "error": "the microphone recorder stopped; is a microphone available?"}
+            if os.path.exists(path) and os.path.getsize(path) > 64:
+                return {"ok": True, "ready_s": round(time.time() - t0, 2)}
+            await asyncio.sleep(0.02)
+        return {"ok": True, "ready_s": round(time.time() - t0, 2)}  # recording, but slow to start
 
     def _stop_recorder(self):
         proc = self.record_proc
@@ -205,10 +278,12 @@ class Plugin:
         self._stop_recorder()
         if not path or not os.path.exists(path) or os.path.getsize(path) < 2000:
             return {"ok": False, "error": "no audio captured"}
+        t0 = time.time()
         try:
-            started = await Plugin.start_server(self)
+            started = await (self.server_task or Plugin.start_server(self))
             if not started.get("ok"):
                 return started
+            t1 = time.time()
             text = await asyncio.get_event_loop().run_in_executor(None, self._transcribe, path)
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"transcribe failed: {e}")
@@ -218,12 +293,19 @@ class Plugin:
                 os.remove(path)
             except OSError:
                 pass
-        return {"ok": True, "text": text}
+        t2 = time.time()
+        return {"ok": True, "text": text, "wait_s": round(t1 - t0, 2), "transcribe_s": round(t2 - t1, 2)}
 
     def _transcribe(self, path: str) -> str:
+        fields = {"response_format": "json", "temperature": "0.0", "temperature_inc": "0.0",
+                  "best_of": "1", "language": "en"}
+        if SHORT_AUDIO_CONTEXT:
+            seconds = max(0.0, (os.path.getsize(path) - 44) / WAV_BYTES_PER_SECOND)
+            # 50 encoder frames per second, plus 2 s of margin; never below 500.
+            fields["audio_ctx"] = str(min(1500, max(500, int((seconds + 2) * 50))))
         boundary = uuid.uuid4().hex
         body = b""
-        for k, v in {"response_format": "json", "temperature": "0.0", "language": "en"}.items():
+        for k, v in fields.items():
             body += (f"--{boundary}\r\nContent-Disposition: form-data; "
                      f'name="{k}"\r\n\r\n{v}\r\n').encode()
         with open(path, "rb") as f:

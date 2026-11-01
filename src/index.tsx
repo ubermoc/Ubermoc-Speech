@@ -1,6 +1,7 @@
 import { callable } from "@decky/api";
 import {
   ButtonItem,
+  DropdownItem,
   Field,
   PanelSection,
   PanelSectionRow,
@@ -11,7 +12,9 @@ import { Component, ReactNode, useEffect, useState } from "react";
 import { FaMicrophone } from "react-icons/fa";
 
 // ---------- types ----------
-interface Status { model: boolean; binary: boolean; server: boolean; recording: boolean }
+interface Status { binary: boolean; server: boolean; recording: boolean }
+interface ModelInfo { name: string; size_mb: number; description: string; installed: boolean }
+interface ModelList { selected: string; models: ModelInfo[] }
 interface BuildInfo { version: string; build: string }
 interface UpdateInfo {
   ok: boolean;
@@ -23,29 +26,44 @@ interface UpdateInfo {
 
 // ---------- backend ----------
 const getStatus = callable<[], Status>("status");
-const downloadModel = callable<[], { ok: boolean; error?: string }>("download_model");
-const getProgress = callable<[], number | null>("get_download_progress");
-const startRecording = callable<[], { ok: boolean; error?: string }>("start_recording");
-const stopAndTranscribe = callable<[], { ok: boolean; text?: string; error?: string }>(
-  "stop_and_transcribe"
-);
+const listModels = callable<[], ModelList>("list_models");
+const setModel = callable<[string], { ok: boolean; error?: string }>("set_model");
+const downloadModel = callable<[string], { ok: boolean; error?: string }>("download_model");
+const getProgress = callable<[], Record<string, number>>("get_download_progress");
+const startRecording = callable<[], { ok: boolean; error?: string; ready_s?: number }>("start_recording");
+const stopAndTranscribe = callable<
+  [],
+  { ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number }
+>("stop_and_transcribe");
 const checkUpdate = callable<[], UpdateInfo>("check_update");
 const installUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("install_update");
 const logBackend = callable<[string], boolean>("log");
 
 // ---------- panel ----------
-type Phase = "idle" | "recording" | "transcribing";
+type Phase = "idle" | "starting" | "recording" | "transcribing";
+
+const sizeLabel = (mb: number) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`);
 
 function Panel() {
   const [status, setStatus] = useState<Status | null>(null);
-  const [progress, setProgress] = useState<number | null>(null);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [active, setActive] = useState("");   // model the server uses
+  const [choice, setChoice] = useState("");   // model shown in the dropdown
+  const [progress, setProgress] = useState<Record<string, number>>({});
   const [phase, setPhase] = useState<Phase>("idle");
   const [result, setResult] = useState("");
+  const [timing, setTiming] = useState("");
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
 
-  const refresh = async () => setStatus(await getStatus());
+  const refresh = async () => {
+    const m = await listModels();
+    setModels(m.models);
+    setActive(m.selected);
+    setChoice((c) => c || m.selected);
+    setStatus(await getStatus());
+  };
 
   useEffect(() => {
     void refresh();
@@ -56,67 +74,120 @@ function Panel() {
     return () => clearInterval(t);
   }, []);
 
-  const download = async () => {
-    setProgress(0);
-    const r = await downloadModel();
-    setProgress(null);
+  const chosen = models.find((m) => m.name === choice);
+  const activeInfo = models.find((m) => m.name === active);
+  const ready = !!activeInfo?.installed;
+
+  const pickModel = async (name: string) => {
+    setChoice(name);
+    const m = models.find((x) => x.name === name);
+    if (m?.installed) {
+      const r = await setModel(name);
+      if (r.ok) setActive(name);
+      else setResult(r.error ?? "Could not switch model");
+    }
+  };
+
+  const download = async (m: ModelInfo) => {
+    setProgress({ ...progress, [m.name]: 0 });
+    const r = await downloadModel(m.name);
     if (!r.ok) setResult(`Download failed: ${r.error ?? "unknown error"}`);
     await refresh();
+    if (r.ok) {
+      const s = await setModel(m.name); // use the model that was just downloaded
+      if (s.ok) setActive(m.name);
+      await refresh();
+    }
   };
 
   const toggleRecording = async () => {
     if (phase === "idle") {
+      setPhase("starting");
+      setResult("");
+      setTiming("");
       const r = await startRecording();
       if (r.ok) {
+        setTiming(`Microphone ready after ${(r.ready_s ?? 0).toFixed(1)} s`);
         setPhase("recording");
-        setResult("");
-      } else setResult(r.error ?? "Could not start recording");
+      } else {
+        setResult(r.error ?? "Could not start recording");
+        setPhase("idle");
+      }
       return;
     }
     if (phase === "recording") {
       setPhase("transcribing");
       const r = await stopAndTranscribe();
       setPhase("idle");
-      setResult(r.ok ? r.text || "(nothing heard)" : r.error ?? "Transcription failed");
-      await refresh();
+      if (r.ok) {
+        setResult(r.text || "(nothing heard)");
+        setTiming((t) => `${t} - text ready ${((r.wait_s ?? 0) + (r.transcribe_s ?? 0)).toFixed(1)} s after you stopped`);
+      } else setResult(r.error ?? "Transcription failed");
     }
   };
 
   return (
     <>
+      <PanelSection title="Model">
+        <PanelSectionRow>
+          <DropdownItem
+            label="Model"
+            description={
+              ready
+                ? `In use: ${active}`
+                : `${active || "Selected model"} is not downloaded yet`
+            }
+            rgOptions={models.map((m) => ({
+              data: m.name,
+              label: m.installed ? `${m.name}  -  downloaded` : `${m.name}  -  ${sizeLabel(m.size_mb)}`,
+            }))}
+            selectedOption={choice}
+            onChange={(o) => pickModel(o.data as string)}
+          />
+        </PanelSectionRow>
+        {chosen && (
+          <PanelSectionRow>
+            <Field label={chosen.name}>{chosen.description}</Field>
+          </PanelSectionRow>
+        )}
+        {chosen && !chosen.installed && progress[chosen.name] === undefined && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => download(chosen)}
+              description="One-time download, kept permanently">
+              Download {chosen.name} ({sizeLabel(chosen.size_mb)})
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {chosen && progress[chosen.name] !== undefined && (
+          <PanelSectionRow>
+            <ProgressBarWithInfo
+              label={`Downloading ${chosen.name}`}
+              nProgress={progress[chosen.name] * 100}
+              sOperationText={`${Math.round(progress[chosen.name] * 100)}%`}
+            />
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
       <PanelSection title="Transcribe">
         {status && !status.binary && (
           <PanelSectionRow>
             <Field label="Problem">whisper-server is missing - reinstall the plugin</Field>
           </PanelSectionRow>
         )}
-        {status && !status.model && progress === null && (
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={download}
-              description="One-time download, kept permanently">
-              Download speech model (142 MB)
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-        {progress !== null && (
-          <PanelSectionRow>
-            <ProgressBarWithInfo
-              label="Downloading speech model"
-              nProgress={progress * 100}
-              sOperationText={`${Math.round(progress * 100)}%`}
-            />
-          </PanelSectionRow>
-        )}
-        {status?.model && (
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={toggleRecording} disabled={phase === "transcribing"}
-              description={phase === "idle" ? "First use takes a few seconds to load the model" : undefined}>
-              {phase === "idle" && "Start recording"}
-              {phase === "recording" && "Recording... tap to stop"}
-              {phase === "transcribing" && "Transcribing..."}
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={toggleRecording}
+            disabled={!ready || phase === "starting" || phase === "transcribing"}
+            description={!ready ? "Download the selected model first" : timing || undefined}
+          >
+            {phase === "idle" && "Start recording"}
+            {phase === "starting" && "Starting microphone... wait"}
+            {phase === "recording" && "SPEAK NOW - tap to stop"}
+            {phase === "transcribing" && "Transcribing..."}
+          </ButtonItem>
+        </PanelSectionRow>
         <PanelSectionRow>
           <Field label="Text">
             <div style={{ whiteSpace: "pre-wrap", textAlign: "right" }}>{result || "-"}</div>
