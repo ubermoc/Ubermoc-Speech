@@ -8,13 +8,14 @@ import {
   ProgressBarWithInfo,
   definePlugin,
 } from "@decky/ui";
-import { Component, ReactNode, useEffect, useState } from "react";
+import { Component, ReactNode, useEffect, useRef, useState } from "react";
 import { FaMicrophone } from "react-icons/fa";
 
 // ---------- types ----------
 interface Status { binary: boolean; server: boolean; recording: boolean }
 interface ModelInfo { name: string; size_mb: number; description: string; installed: boolean }
 interface ModelList { selected: string; models: ModelInfo[] }
+interface DlProgress { done: number; total: number }
 interface BuildInfo { version: string; build: string }
 interface UpdateInfo {
   ok: boolean;
@@ -29,7 +30,8 @@ const getStatus = callable<[], Status>("status");
 const listModels = callable<[], ModelList>("list_models");
 const setModel = callable<[string], { ok: boolean; error?: string }>("set_model");
 const downloadModel = callable<[string], { ok: boolean; error?: string }>("download_model");
-const getProgress = callable<[], Record<string, number>>("get_download_progress");
+const getProgress = callable<[], Record<string, DlProgress>>("get_download_progress");
+const cancelDownload = callable<[string], boolean>("cancel_download");
 const startRecording = callable<[], { ok: boolean; error?: string; ready_s?: number }>("start_recording");
 const stopAndTranscribe = callable<
   [],
@@ -43,19 +45,27 @@ const logBackend = callable<[string], boolean>("log");
 type Phase = "idle" | "starting" | "recording" | "transcribing";
 
 const sizeLabel = (mb: number) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`);
+const MB = 1024 * 1024;
+const progressText = (p: DlProgress) => {
+  const pct = p.total ? Math.min(100, Math.round((p.done / p.total) * 100)) : 0;
+  return `${pct}% - ${Math.round(p.done / MB)} of ${Math.round(p.total / MB)} MB`;
+};
+const progressPct = (p: DlProgress) => (p.total ? Math.min(100, (p.done / p.total) * 100) : 0);
 
 function Panel() {
   const [status, setStatus] = useState<Status | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [active, setActive] = useState("");   // model the server uses
   const [choice, setChoice] = useState("");   // model shown in the dropdown
-  const [progress, setProgress] = useState<Record<string, number>>({});
+  const [progress, setProgress] = useState<Record<string, DlProgress>>({});
+  const [dlError, setDlError] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
   const [result, setResult] = useState("");
   const [timing, setTiming] = useState("");
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
+  const wasDownloading = useRef(false);
 
   const refresh = async () => {
     const m = await listModels();
@@ -69,34 +79,42 @@ function Panel() {
     void refresh();
     void checkUpdate().then(setUpd);
     const t = setInterval(async () => {
-      setProgress(await getProgress());
-    }, 1000);
+      const p = await getProgress();
+      setProgress(p);
+      const busy = Object.keys(p).length > 0;
+      // A download just finished (the backend switches to the new model itself).
+      if (wasDownloading.current && !busy) void refresh();
+      wasDownloading.current = busy;
+    }, 500);
     return () => clearInterval(t);
   }, []);
 
   const chosen = models.find((m) => m.name === choice);
   const activeInfo = models.find((m) => m.name === active);
   const ready = !!activeInfo?.installed;
+  const downloading = Object.entries(progress);
 
-  const pickModel = async (name: string) => {
-    setChoice(name);
-    const m = models.find((x) => x.name === name);
-    if (m?.installed) {
-      const r = await setModel(name);
-      if (r.ok) setActive(name);
-      else setResult(r.error ?? "Could not switch model");
-    }
+  const startDownload = async (m: ModelInfo) => {
+    setDlError("");
+    setProgress((p) => ({ ...p, [m.name]: { done: 0, total: m.size_mb * MB } }));
+    wasDownloading.current = true;
+    const r = await downloadModel(m.name);
+    if (!r.ok) setDlError(`${m.name}: ${r.error ?? "download failed"}`);
+    await refresh();
   };
 
-  const download = async (m: ModelInfo) => {
-    setProgress({ ...progress, [m.name]: 0 });
-    const r = await downloadModel(m.name);
-    if (!r.ok) setResult(`Download failed: ${r.error ?? "unknown error"}`);
-    await refresh();
-    if (r.ok) {
-      const s = await setModel(m.name); // use the model that was just downloaded
-      if (s.ok) setActive(m.name);
-      await refresh();
+  // Downloaded model: switch now. Not downloaded: start downloading it.
+  const pickModel = async (name: string) => {
+    setChoice(name);
+    setDlError("");
+    const m = models.find((x) => x.name === name);
+    if (!m || progress[name]) return;
+    if (m.installed) {
+      const r = await setModel(name);
+      if (r.ok) setActive(name);
+      else setDlError(r.error ?? "Could not switch model");
+    } else {
+      void startDownload(m);
     }
   };
 
@@ -128,45 +146,17 @@ function Panel() {
 
   return (
     <>
-      <PanelSection title="Model">
+      <PanelSection title="Current model">
         <PanelSectionRow>
-          <DropdownItem
-            label="Model"
-            description={
-              ready
-                ? `In use: ${active}`
-                : `${active || "Selected model"} is not downloaded yet`
-            }
-            rgOptions={models.map((m) => ({
-              data: m.name,
-              label: m.installed ? `${m.name}  -  downloaded` : `${m.name}  -  ${sizeLabel(m.size_mb)}`,
-            }))}
-            selectedOption={choice}
-            onChange={(o) => pickModel(o.data as string)}
-          />
+          <Field label={active || "..."} description={activeInfo?.description}>
+            {ready ? "Downloaded - in use" : "Not downloaded"}
+          </Field>
         </PanelSectionRow>
-        {chosen && (
-          <PanelSectionRow>
-            <Field label={chosen.name}>{chosen.description}</Field>
+        {downloading.map(([name, p]) => (
+          <PanelSectionRow key={name}>
+            <Field label={`Downloading ${name}`}>{progressText(p)}</Field>
           </PanelSectionRow>
-        )}
-        {chosen && !chosen.installed && progress[chosen.name] === undefined && (
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={() => download(chosen)}
-              description="One-time download, kept permanently">
-              Download {chosen.name} ({sizeLabel(chosen.size_mb)})
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-        {chosen && progress[chosen.name] !== undefined && (
-          <PanelSectionRow>
-            <ProgressBarWithInfo
-              label={`Downloading ${chosen.name}`}
-              nProgress={progress[chosen.name] * 100}
-              sOperationText={`${Math.round(progress[chosen.name] * 100)}%`}
-            />
-          </PanelSectionRow>
-        )}
+        ))}
       </PanelSection>
 
       <PanelSection title="Transcribe">
@@ -180,7 +170,7 @@ function Panel() {
             layout="below"
             onClick={toggleRecording}
             disabled={!ready || phase === "starting" || phase === "transcribing"}
-            description={!ready ? "Download the selected model first" : timing || undefined}
+            description={!ready ? "Download the current model first (Choose a model, below)" : timing || undefined}
           >
             {phase === "idle" && "Start recording"}
             {phase === "starting" && "Starting microphone... wait"}
@@ -193,6 +183,56 @@ function Panel() {
             <div style={{ whiteSpace: "pre-wrap", textAlign: "right" }}>{result || "-"}</div>
           </Field>
         </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Choose a model">
+        <PanelSectionRow>
+          <DropdownItem
+            label="Model"
+            description="Downloaded models switch right away. Others start downloading when you pick them."
+            rgOptions={models.map((m) => ({
+              data: m.name,
+              label: m.installed ? `${m.name}  -  downloaded` : `${m.name}  -  ${sizeLabel(m.size_mb)}`,
+            }))}
+            selectedOption={choice}
+            onChange={(o) => pickModel(o.data as string)}
+          />
+        </PanelSectionRow>
+        {chosen && (
+          <PanelSectionRow>
+            <Field label={chosen.name}>{chosen.description}</Field>
+          </PanelSectionRow>
+        )}
+        {downloading.map(([name, p]) => (
+          <div key={name}>
+            <PanelSectionRow>
+              <ProgressBarWithInfo
+                label={`Downloading ${name}`}
+                nProgress={progressPct(p)}
+                sOperationText={progressText(p)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={() => cancelDownload(name)}>
+                Cancel download
+              </ButtonItem>
+            </PanelSectionRow>
+          </div>
+        ))}
+        {dlError && (
+          <>
+            <PanelSectionRow>
+              <Field label="Problem">{dlError}</Field>
+            </PanelSectionRow>
+            {chosen && !chosen.installed && !progress[chosen.name] && (
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => startDownload(chosen)}>
+                  Retry download of {chosen.name}
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+          </>
+        )}
       </PanelSection>
 
       <PanelSection title="Updates">

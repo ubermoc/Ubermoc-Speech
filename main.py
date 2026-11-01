@@ -69,6 +69,7 @@ class Plugin:
     record_proc: subprocess.Popen | None = None
     record_path: str | None = None
     download_progress: dict = {}
+    cancel_flags: set = set()
 
     # ---------- lifecycle ----------
     async def _main(self):
@@ -131,51 +132,68 @@ class Plugin:
     async def set_model(self, name: str) -> dict:
         if name not in MODELS or not self._model_ok(name):
             return {"ok": False, "error": "model is not downloaded"}
-        with open(os.path.join(self._data_dir(), "settings.json"), "w") as f:
-            json.dump({"model": name}, f)
+        self._save_selected(name)
         await Plugin.stop_server(self)  # restarts with the new model on next use
         return {"ok": True}
 
+    def _save_selected(self, name: str):
+        with open(os.path.join(self._data_dir(), "settings.json"), "w") as f:
+            json.dump({"model": name}, f)
+
     async def download_model(self, name: str) -> dict:
+        """Download a model and, when finished, switch to it."""
         if name not in MODELS:
             return {"ok": False, "error": "unknown model"}
-        if self._model_ok(name):
-            return {"ok": True}
-        dest = self._model_path(name)
-        tmp = dest + ".part"
-        url = f"{MODEL_BASE_URL}/ggml-{name}.bin"
-        self.download_progress[name] = 0.0
+        if name in self.download_progress:
+            return {"ok": False, "error": "already downloading"}
+        if not self._model_ok(name):
+            dest = self._model_path(name)
+            tmp = dest + ".part"
+            url = f"{MODEL_BASE_URL}/ggml-{name}.bin"
+            self.cancel_flags.discard(name)
+            self.download_progress[name] = {"done": 0, "total": MODELS[name][0] * 1024 * 1024}
 
-        def work():
-            have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
-            headers = {"User-Agent": "ubermoc-speech"}
-            if have:
-                headers["Range"] = f"bytes={have}-"
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, context=_ssl_context(), timeout=60) as r:
-                resumed = r.status == 206
-                if have and not resumed:
-                    have = 0
-                total = have + int(r.headers.get("Content-Length") or 0)
-                done = have
-                with open(tmp, "ab" if resumed else "wb") as out:
-                    while chunk := r.read(1 << 20):
-                        out.write(chunk)
-                        done += len(chunk)
-                        if total:
-                            self.download_progress[name] = done / total
-            if total and os.path.getsize(tmp) != total:
-                raise IOError("download incomplete; tap download again to resume")
-            os.replace(tmp, dest)
+            def work():
+                have = os.path.getsize(tmp) if os.path.exists(tmp) else 0
+                headers = {"User-Agent": "ubermoc-speech"}
+                if have:
+                    headers["Range"] = f"bytes={have}-"
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, context=_ssl_context(), timeout=60) as r:
+                    resumed = r.status == 206
+                    if have and not resumed:
+                        have = 0
+                    total = have + int(r.headers.get("Content-Length") or 0)
+                    done = have
+                    self.download_progress[name] = {"done": done, "total": total or self.download_progress[name]["total"]}
+                    with open(tmp, "ab" if resumed else "wb") as out:
+                        while chunk := r.read(1 << 18):
+                            if name in self.cancel_flags:
+                                raise IOError("cancelled (partial download kept)")
+                            out.write(chunk)
+                            done += len(chunk)
+                            self.download_progress[name]["done"] = done
+                if total and os.path.getsize(tmp) != total:
+                    raise IOError("download incomplete; select the model again to resume")
+                os.replace(tmp, dest)
 
-        try:
-            await asyncio.get_event_loop().run_in_executor(None, work)
-        except Exception as e:  # noqa: BLE001
-            decky.logger.error(f"download failed: {e}")
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, work)
+            except Exception as e:  # noqa: BLE001
+                decky.logger.error(f"download failed: {e}")
+                self.download_progress.pop(name, None)
+                self.cancel_flags.discard(name)
+                return {"ok": False, "error": str(e)}
             self.download_progress.pop(name, None)
-            return {"ok": False, "error": str(e)}
-        self.download_progress.pop(name, None)
-        return {"ok": True}
+        if self._model_ok(name):
+            self._save_selected(name)  # use it, even if the panel was closed meanwhile
+            await Plugin.stop_server(self)
+            return {"ok": True}
+        return {"ok": False, "error": "downloaded file looks incomplete"}
+
+    async def cancel_download(self, name: str) -> bool:
+        self.cancel_flags.add(name)
+        return True
 
     async def get_download_progress(self) -> dict:
         return self.download_progress
@@ -200,9 +218,8 @@ class Plugin:
             return {"ok": False, "error": "whisper-server binary missing"}
         os.chmod(binary, 0o755)
         env = {**os.environ, "LD_LIBRARY_PATH": os.path.dirname(binary)}
-        # -bo 1 / -nf: skip extra decoding passes, which only slow short phrases down.
         cmd = [binary, "-m", self._model_path(name), "--host", HOST, "--port", str(PORT),
-               "-t", str(min(4, os.cpu_count() or 4)), "-bo", "1", "-nf", "-nt"]
+               "-t", str(min(4, os.cpu_count() or 4)), "-nt"]
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
         log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "whisper-server.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
@@ -297,8 +314,7 @@ class Plugin:
         return {"ok": True, "text": text, "wait_s": round(t1 - t0, 2), "transcribe_s": round(t2 - t1, 2)}
 
     def _transcribe(self, path: str) -> str:
-        fields = {"response_format": "json", "temperature": "0.0", "temperature_inc": "0.0",
-                  "best_of": "1", "language": "en"}
+        fields = {"response_format": "json", "temperature": "0.0", "language": "en"}
         if SHORT_AUDIO_CONTEXT:
             seconds = max(0.0, (os.path.getsize(path) - 44) / WAV_BYTES_PER_SECOND)
             # 50 encoder frames per second, plus 2 s of margin; never below 500.
