@@ -190,6 +190,25 @@ class Plugin:
             return {"ok": True}  # it is only used once the user selects it
         return {"ok": False, "error": "downloaded file looks incomplete"}
 
+    async def delete_model(self, name: str) -> dict:
+        if name not in MODELS:
+            return {"ok": False, "error": "unknown model"}
+        if name in self.download_progress:
+            return {"ok": False, "error": "it is still downloading"}
+        if name == self._selected() and self.record_proc and self.record_proc.poll() is None:
+            return {"ok": False, "error": "stop recording first"}
+        was_current = name == self._selected()
+        if was_current:
+            await Plugin.stop_server(self)  # release the model file
+        for path in (self._model_path(name), self._model_path(name) + ".part"):
+            try:
+                os.remove(path)
+            except FileNotFoundError:
+                pass
+            except OSError as e:
+                return {"ok": False, "error": str(e)}
+        return {"ok": True, "was_current": was_current, "current": self._selected()}
+
     async def cancel_download(self, name: str) -> bool:
         self.cancel_flags.add(name)
         return True

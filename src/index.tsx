@@ -32,6 +32,7 @@ const setModel = callable<[string], { ok: boolean; error?: string }>("set_model"
 const downloadModel = callable<[string], { ok: boolean; error?: string }>("download_model");
 const getProgress = callable<[], Record<string, DlProgress>>("get_download_progress");
 const cancelDownload = callable<[string], boolean>("cancel_download");
+const deleteModel = callable<[string], { ok: boolean; error?: string }>("delete_model");
 const startRecording = callable<[], { ok: boolean; error?: string; ready_s?: number }>("start_recording");
 const stopAndTranscribe = callable<
   [],
@@ -70,6 +71,7 @@ function Panel() {
   const [progress, setProgress] = useState<Record<string, DlProgress>>({});
   const [speeds, setSpeeds] = useState<Record<string, number>>({});
   const [dlError, setDlError] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [result, setResult] = useState("");
   const [timing, setTiming] = useState("");
@@ -129,6 +131,20 @@ function Panel() {
     wasDownloading.current = true;
     const r = await downloadModel(m.name);
     if (!r.ok) setDlError(`${m.name}: ${r.error ?? "download failed"}`);
+    await refresh();
+  };
+
+  // Two taps: the first asks, the second deletes.
+  const removeModel = async (m: ModelInfo) => {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      setTimeout(() => setConfirmDelete(false), 4000);
+      return;
+    }
+    setConfirmDelete(false);
+    const r = await deleteModel(m.name);
+    if (!r.ok) setDlError(`${m.name}: ${r.error ?? "could not delete"}`);
+    else setDlError("");
     await refresh();
   };
 
@@ -206,6 +222,7 @@ function Panel() {
               lastChoice = name;
               setChoice(name);
               setDlError("");
+              setConfirmDelete(false);
               void logBackend(`choose model: ${name}`);
             }}
           />
@@ -214,6 +231,21 @@ function Panel() {
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={() => startDownload(chosen)}>
               {dlError ? "Retry download" : "Download"} {chosen.name} ({sizeLabel(chosen.size_mb)})
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {chosen && chosen.installed && !progress[chosen.name] && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={() => removeModel(chosen)}
+              description={
+                chosen.name === active
+                  ? "This is your current model. You can download it again later."
+                  : "You can download it again later."
+              }
+            >
+              {confirmDelete ? `Tap again to delete ${chosen.name}` : `Delete ${chosen.name}`}
             </ButtonItem>
           </PanelSectionRow>
         )}
