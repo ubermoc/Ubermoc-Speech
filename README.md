@@ -13,14 +13,26 @@ mouse buttons or controller buttons, alone or in any combination (for example
 `Left Ctrl + F9`, `Mouse side button`, `R4 + R5`, or `Left Ctrl + R4`).
 
 It is read by the plugin backend, not the panel, so it keeps working while a game
-has focus. Reading is passive (nothing is grabbed or sent to any device).
-- keyboards / mice / generic gamepads: `/dev/input/event*`
-- Steam Deck built-in controller: raw HID reports from `/dev/hidraw*`
-  (the Steam client stops delivering controller buttons to plugins while a game
-  has focus, and the kernel removes the Deck's evdev gamepad while Steam holds
-  the device). Button layout cross-checked against the Linux `hid-steam` driver
-  and SDL's Steam Deck driver (see `tests/test_input.py`).
-- Valve's emulated keyboard / mouse are ignored.
+has focus. Reading is passive (nothing is sent to any device; the game and Steam
+keep receiving all input).
+- keyboards / mice / generic gamepads (Xbox, DualSense, Switch Pro, 8BitDo,
+  handheld built-ins): `/dev/input/event*`
+- Valve controllers: raw HID reports from `/dev/hidraw*` for the Steam Deck, the
+  original Steam Controller (USB `1102`, dongle `1142`) and the 2026 Steam
+  Controller (`1302`-`1305`, "Ibex" in the kernel). The Steam client stops
+  delivering controller buttons to plugins while a game has focus, and the kernel
+  removes the evdev gamepad while Steam holds the device, so raw reports are the
+  way in. Every button table is cross-checked against the Linux `hid-steam` driver
+  and SDL's drivers (see `tests/test_input.py`).
+- The Steam interface's own controller feed is forwarded too. It works for any
+  controller Steam supports, but only while the Steam interface is active, so it
+  covers recording an activator and the Steam menu; the raw readers cover games.
+- Valve's emulated keyboard / mouse are never used as activator inputs.
+
+While an activator is being recorded, keyboards, mice and evdev gamepads (and
+Valve's emulated keyboard/mouse) are held exclusively (EVIOCGRAB) so the system
+does not react to the keys pressed; the hold lasts at most ~15 s. Controllers that
+are read through raw HID cannot be held, so Steam still moves its menu with them.
 
 Privacy: devices are opened only while an activator is set or being recorded;
 no key or button is logged, and only the activator you choose is stored.

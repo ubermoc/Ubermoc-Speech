@@ -442,6 +442,12 @@ class Plugin:
             "watching": self.hub.status() if self.hub else {},
         }
 
+    async def set_ui_pad(self, tokens: list) -> bool:
+        """Controller buttons held according to the Steam interface (sent by the panel)."""
+        if self.hub:
+            self.hub.set_ui_held(tokens)
+        return True
+
     async def start_capture(self) -> dict:
         """Listen for the next combination the user holds and releases."""
         if not self.hub:

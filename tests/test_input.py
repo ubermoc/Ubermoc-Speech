@@ -64,7 +64,7 @@ class DeckReport(unittest.TestCase):
         good = deck_report(7)
         self.assertIsNotNone(ui.parse_deck_report(good))
         for bad in (good[:63], good + b"\0", b"\x02" + good[1:], good[:1] + b"\x01" + good[2:],
-                    good[:2] + b"\x0a" + good[3:], good[:3] + b"\x20" + good[4:]):
+                    good[:2] + b"\x0a" + good[3:]):
             self.assertIsNone(ui.parse_deck_report(bad))
 
     def test_table_matches_kernel_and_sdl(self):
@@ -91,6 +91,104 @@ class DeckReport(unittest.TestCase):
         for name, bit in ours.items():
             self.assertEqual((kernel[name][0] - 8) * 8 + kernel[name][1], bit, name)
             self.assertEqual(sdl[name], 1 << bit, name)
+
+
+
+def sc_report(*bits, wireless_event=None):
+    """Original Steam Controller: 64 bytes, 01 00 <type> <len>, buttons u24 at byte 8."""
+    mask = 0
+    for b in bits:
+        mask |= 1 << b
+    r = bytearray(64)
+    r[0], r[1], r[2], r[3] = 1, 0, 1, 60
+    r[8:11] = mask.to_bytes(3, "little")
+    if wireless_event is not None:
+        r[2], r[4] = 3, wireless_event
+    return bytes(r)
+
+
+def triton_report(*bits, rid=0x42):
+    """Steam Controller (2026): id, sequence number, u32 button mask at bytes 2..5."""
+    mask = 0
+    for b in bits:
+        mask |= 1 << b
+    r = bytearray(54)
+    r[0], r[1] = rid, 9
+    r[2:6] = mask.to_bytes(4, "little")
+    return bytes(r)
+
+
+class SteamControllers(unittest.TestCase):
+    def test_original_steam_controller(self):
+        self.assertEqual(ui.parse_hid_report("sc", sc_report(15, 16)), {"pad:L5", "pad:R5"})  # the two grips
+        self.assertEqual(ui.parse_hid_report("sc", sc_report(7, 3)), {"pad:A", "pad:L1"})
+        self.assertEqual(ui.parse_hid_report("sc", sc_report()), frozenset())
+
+    def test_original_pad_click_is_stick_click_when_pad_and_stick_are_in_use(self):
+        self.assertEqual(ui.parse_hid_report("sc", sc_report(17)), {"pad:Left pad click"})
+        self.assertEqual(ui.parse_hid_report("sc", sc_report(17, 23)), {"pad:L3"})
+
+    def test_original_wireless_events(self):
+        self.assertEqual(ui.parse_hid_report("sc", sc_report(wireless_event=1)), frozenset())   # went away
+        self.assertIsNone(ui.parse_hid_report("sc", sc_report(wireless_event=2)))               # connected: no buttons
+        self.assertIsNone(ui.parse_hid_report("sc", bytes(64)))
+        self.assertIsNone(ui.parse_hid_report("sc", sc_report(1)[:63]))
+
+    def test_2026_steam_controller(self):
+        for rid in (0x42, 0x45, 0x47):
+            self.assertEqual(ui.parse_hid_report("triton", triton_report(7, 8, rid=rid)), {"pad:R4", "pad:R5"})
+        self.assertEqual(ui.parse_hid_report("triton", triton_report(17, 18)), {"pad:L4", "pad:L5"})
+        self.assertEqual(ui.parse_hid_report("triton", triton_report()), frozenset())
+
+    def test_2026_wireless_status_and_foreign_reports(self):
+        self.assertEqual(ui.parse_hid_report("triton", bytes([0x79, 1]) + bytes(10)), frozenset())  # disconnected
+        self.assertIsNone(ui.parse_hid_report("triton", bytes([0x79, 2]) + bytes(10)))              # connected
+        self.assertIsNone(ui.parse_hid_report("triton", bytes([0x43]) + bytes(14)))                 # battery
+        self.assertIsNone(ui.parse_hid_report("triton", bytes(3)))
+        self.assertIsNone(ui.parse_hid_report("unknown-model", triton_report(0)))
+
+    def test_original_table_matches_kernel_and_sdl(self):
+        # hid-steam.c steam_controller_button_mappings[]: {BTN, byte, bit}
+        kernel = {"R2": (8, 0), "L2": (8, 1), "R1": (8, 2), "L1": (8, 3), "Y": (8, 4), "B": (8, 5),
+                  "X": (8, 6), "A": (8, 7), "View": (9, 4), "Guide": (9, 5), "Menu": (9, 6),
+                  "L5": (9, 7), "R5": (10, 0), "L3": (10, 6),
+                  "D-pad Up": (9, 0), "D-pad Right": (9, 1), "D-pad Left": (9, 2), "D-pad Down": (9, 3)}
+        # SDL_hidapi_steam.c STEAM_*_MASK
+        sdl = {"R2": 0x1, "L2": 0x2, "R1": 0x4, "L1": 0x8, "Y": 0x10, "B": 0x20, "X": 0x40, "A": 0x80,
+               "D-pad Up": 0x100, "D-pad Right": 0x200, "D-pad Left": 0x400, "D-pad Down": 0x800,
+               "View": 0x1000, "Guide": 0x2000, "Menu": 0x4000, "L5": 0x8000, "R5": 0x10000,
+               "Left pad click": 0x20000, "Right pad click": 0x40000, "L3": 0x400000}
+        ours = {name: bit for bit, name in ui.SC_BUTTONS.items()}
+        self.assertEqual(set(ours), set(sdl))
+        for name, bit in ours.items():
+            self.assertEqual(sdl[name], 1 << bit, name)
+            if name in kernel:
+                self.assertEqual((kernel[name][0] - 8) * 8 + kernel[name][1], bit, name)
+
+    def test_2026_table_matches_kernel_and_sdl(self):
+        # hid-steam.c steam_ibex_button_mappings[]: {BTN, byte, bit}; buttons start at byte 2.
+        # (the kernel calls START/SELECT what SDL calls VIEW/MENU: same two bits, 6 and 14)
+        kernel = {"A": (2, 0), "B": (2, 1), "X": (2, 2), "Y": (2, 3), "QAM": (2, 4), "R3": (2, 5),
+                  "View": (2, 6), "R4": (2, 7), "R5": (3, 0), "R1": (3, 1),
+                  "D-pad Down": (3, 2), "D-pad Right": (3, 3), "D-pad Left": (3, 4), "D-pad Up": (3, 5),
+                  "Menu": (3, 6), "L3": (3, 7), "Guide": (4, 0), "L4": (4, 1), "L5": (4, 2), "L1": (4, 3),
+                  "Right pad click": (4, 6), "R2": (4, 7), "Left pad click": (5, 2), "L2": (5, 3)}
+        # SDL_hidapi_steam_triton.c TRITON_LBUTTON_* / TRITON_HBUTTON_* / *_CLICK
+        sdl = {"A": 0x1, "B": 0x2, "X": 0x4, "Y": 0x8, "QAM": 0x10, "R3": 0x20, "View": 0x40, "R4": 0x80,
+               "R5": 0x100, "R1": 0x200, "D-pad Down": 0x400, "D-pad Right": 0x800, "D-pad Left": 0x1000,
+               "D-pad Up": 0x2000, "Menu": 0x4000, "L3": 0x8000, "Guide": 0x10000, "L4": 0x20000,
+               "L5": 0x40000, "L1": 0x80000, "Right pad click": 0x400000, "R2": 0x800000,
+               "Left pad click": 0x4000000, "L2": 0x8000000}
+        ours = {name: bit for bit, name in ui.TRITON_BUTTONS.items()}
+        self.assertEqual(set(ours), set(kernel))
+        self.assertEqual(set(ours), set(sdl))
+        for name, bit in ours.items():
+            self.assertEqual((kernel[name][0] - 2) * 8 + kernel[name][1], bit, name)
+            self.assertEqual(sdl[name], 1 << bit, name)
+
+    def test_all_steam_controller_ids_are_known(self):
+        # hid-ids.h: 1102 SC, 1142 dongle, 1205 Deck, 1302 Ibex, 1303 Ibex BLE, 1304 Proteus, 1305 Nereid
+        self.assertEqual(set(ui.HID_MODELS), {0x1102, 0x1142, 0x1205, 0x1302, 0x1303, 0x1304, 0x1305})
 
 
 PROC_SAMPLE = """I: Bus=0019 Vendor=0000 Product=0001 Version=0000
@@ -164,7 +262,7 @@ class _Env:
 
     def add(self, name, kind):
         r, w = os.pipe()
-        self.hub.add_source(r, name, kind)
+        self.hub.add_source(r, name, kind, keep=True)
         self.writers[name] = w
         self.hub._running = True
 
@@ -286,6 +384,142 @@ class Hub(unittest.TestCase):
         self.assertEqual(self.e.calls, [])
 
 
+class HubNewSources(unittest.TestCase):
+    def setUp(self):
+        self.e = _Env()
+
+    def tearDown(self):
+        self.e.close()
+
+    def test_original_steam_controller_grips(self):
+        self.e.add("hidraw1", "sc")
+        self.e.hub.set_activator(["pad:L5", "pad:R5"])
+        self.e.send("hidraw1", sc_report(15))
+        self.assertEqual(self.e.calls, [])
+        self.e.send("hidraw1", sc_report(15, 16))
+        self.assertEqual(self.e.calls, [True])
+        self.e.send("hidraw1", sc_report())
+        self.assertEqual(self.e.calls, [True, False])
+
+    def test_2026_steam_controller_back_buttons(self):
+        self.e.add("hidraw3", "triton")
+        self.e.hub.set_activator(["pad:R4", "pad:R5"])
+        self.e.send("hidraw3", triton_report(7, 8))
+        self.assertEqual(self.e.calls, [True])
+        self.e.send("hidraw3", bytes([0x79, 1]) + bytes(20))     # controller switched off: nothing stays held
+        self.assertEqual(self.e.calls, [True, False])
+
+    def test_same_combination_works_on_any_valve_controller(self):
+        for node, kind, report in (("a", "deck", deck_report(42, 16)), ("b", "triton", triton_report(7, 8))):
+            e = _Env()
+            e.add(node, kind)
+            e.hub.set_activator(["pad:R4", "pad:R5"])
+            e.send(node, report)
+            self.assertEqual(e.calls, [True], kind)
+            e.close()
+
+    def test_steam_interface_feed(self):
+        self.e.hub.set_activator(["pad:R4", "pad:R5"])
+        self.e.hub.set_ui_held(["pad:R4"])
+        self.assertEqual(self.e.calls, [])
+        self.e.hub.set_ui_held(["pad:R4", "pad:R5"])
+        self.assertEqual(self.e.calls, [True])
+        self.e.hub.set_ui_held([])
+        self.assertEqual(self.e.calls, [True, False])
+
+    def test_steam_interface_feed_expires_so_nothing_sticks(self):
+        self.e.hub.UI_TTL_S = 0.05
+        self.e.hub.set_activator(["pad:A"])
+        self.e.hub.set_ui_held(["pad:A"])
+        self.assertEqual(self.e.calls, [True])
+        self.e.loop.run_until_complete(asyncio.sleep(0.15))      # the panel stopped sending
+        self.assertEqual(self.e.calls, [True, False])
+
+    def test_steam_interface_feed_ignores_non_controller_tokens(self):
+        self.e.hub.set_activator(["key:67"])
+        self.e.hub.set_ui_held(["key:67"])
+        self.assertEqual(self.e.calls, [])
+
+    def test_steam_interface_feed_combines_with_raw_sources(self):
+        self.e.add("kbd", "keyboard")
+        self.e.hub.set_activator(["key:29", "pad:R4"])
+        self.e.send("kbd", ev(1, 29, 1))
+        self.e.hub.set_ui_held(["pad:R4"])
+        self.assertEqual(self.e.calls, [True])
+
+    def test_status_lists_controllers_and_unrecognised_devices(self):
+        self.e.add("hidraw1", "triton")
+        self.e.hub.sources = None
+        for src in self.e.hub._sources.values():
+            src.name = "Steam Controller (2026)"
+        self.e.hub._unrecognized = ["28de:9999"]
+        st = self.e.hub.status()
+        self.assertEqual(st["controllers"], ["Steam Controller (2026)"])
+        self.assertEqual(st["unrecognized"], ["28de:9999"])
+
+
+class Grabbing(unittest.TestCase):
+    def setUp(self):
+        self.e = _Env()
+        self.e.add("kbd", "keyboard")
+        self.e.add("hidraw1", "triton")
+        self.grabs = []
+        self.e.hub._grab = lambda fd, on: self.grabs.append((fd, on)) or True
+        self.kbd_fd = next(f for f, s in self.e.hub._sources.items() if s.key == "kbd")
+        self.hid_fd = next(f for f, s in self.e.hub._sources.items() if s.key == "hidraw1")
+
+    def tearDown(self):
+        self.e.close()
+
+    def test_capture_holds_evdev_devices_but_not_hidraw(self):
+        self.e.hub.begin_capture(timeout=5)
+        self.assertIn((self.kbd_fd, True), self.grabs)
+        self.assertNotIn(self.hid_fd, [fd for fd, _ in self.grabs])      # hidraw cannot be held
+        self.e.hub.cancel_capture()
+        self.assertIn((self.kbd_fd, False), self.grabs)                  # and it is always released
+
+    def test_hold_released_on_completion_timeout_and_stop(self):
+        for ending in ("done", "timeout", "stop"):
+            e = _Env()                      # a finished capture with no activator closes everything
+            e.add("kbd", "keyboard")
+            e.add("hidraw1", "triton")
+            grabs = []
+            e.hub._grab = lambda fd, on, g=grabs: g.append((fd, on)) or True
+            kbd_fd = next(f for f, s in e.hub._sources.items() if s.key == "kbd")
+            e.hub.begin_capture(timeout=5)
+            self.assertIn((kbd_fd, True), grabs, ending)
+            e.hub._capture["t0"] -= 1
+            if ending == "done":
+                e.send("hidraw1", triton_report(7))
+                e.send("hidraw1", triton_report())
+            elif ending == "timeout":
+                e.hub._capture_timeout()
+            else:
+                e.hub.stop()
+            self.assertIn((kbd_fd, False), grabs, ending)
+            e.close()
+
+    def test_emulated_valve_keyboard_mouse_are_found_for_holding(self):
+        devices = ui.parse_proc_devices(PROC_SAMPLE)
+        emulated = [d["event"] for d in devices if d["vendor"] == ui.VENDOR_VALVE and d["raw_kind"] in ("keyboard", "mouse")]
+        self.assertEqual(sorted(emulated), ["event7", "event8"])
+
+    def test_failed_hold_does_not_break_capture(self):
+        self.e.hub._grab = lambda fd, on: False                          # e.g. another program holds the device
+        done = []
+        self.e.hub.begin_capture(timeout=5, on_done=done.append)
+        self.e.hub._capture["t0"] -= 1
+        self.e.send("kbd", ev(1, 67, 1))
+        self.e.send("kbd", ev(1, 67, 0))
+        self.assertEqual(done, [["key:67"]])
+
+    def test_real_ioctl_on_a_non_device_is_harmless(self):
+        r, w = os.pipe()
+        self.assertFalse(ui.InputHub._grab(r, True))                     # ENOTTY, not an exception
+        os.close(r)
+        os.close(w)
+
+
 class Capture(unittest.TestCase):
     def setUp(self):
         self.e = _Env()
@@ -376,6 +610,7 @@ class Lifecycle(unittest.TestCase):
             self.assertEqual(found["input/event3"][0], "keyboard")
             self.assertEqual(found["input/event4"][0], "mouse")
             self.assertEqual(found["hidraw2"][0], "deck")
+            self.assertEqual(sorted(hub._emulated), ["input/event7", "input/event8"])
             self.assertNotIn("input/event6", found)              # Steam virtual pad skipped when a Deck is present
             hub.set_activator(["key:67"])                        # opens what exists (regular files; may not poll)
             self.assertTrue(hub.status()["running"])

@@ -11,16 +11,25 @@ Why the backend and not the panel:
 
 Sources (each constant below names where it comes from):
   * keyboards / mice / generic gamepads: /dev/input/event*   (evdev)
-  * Steam Deck built-in controller:      /dev/hidraw*       (raw HID reports).
-    While Steam is running its client holds the hidraw node, and the kernel
-    driver (drivers/hid/hid-steam.c) then withdraws the Deck's evdev gamepad, so
-    evdev cannot be used for the built-in controller.
+  * Valve controllers (Steam Deck, Steam Controller 2015, Steam Controller 2026):
+    /dev/hidraw* (raw HID reports). While Steam is running its client holds the
+    device, and the kernel driver (drivers/hid/hid-steam.c) then withdraws the
+    evdev gamepad, so evdev cannot be used for these.
+  * "ui": the Steam interface's own controller feed, forwarded by the panel. It
+    works for any controller Steam supports, but only while the Steam interface
+    is active (not in a game), so it complements the raw readers.
+
+While an activator is being RECORDED the keyboards, mice and gamepads that are
+read through evdev are exclusively held (EVIOCGRAB), together with Valve's
+emulated keyboard/mouse, so the system does not react to the keys being pressed.
+The hold lasts only for the recording (at most ~15 s) and is released on any exit.
 
 Privacy: this module reads every keyboard. It never logs, stores or exposes a
 key/button except as the "held" set compared against the user's chosen
 activator, and it only opens devices while an activator is set or being captured.
 """
 import asyncio
+import fcntl
 import glob
 import os
 import re
@@ -42,22 +51,29 @@ ABS_HAT0X, ABS_HAT0Y = 0x10, 0x11
 EVENT = struct.Struct("llHHi")
 
 VENDOR_VALVE = 0x28DE
-PRODUCT_DECK = 0x1205            # Steam Deck controller (hidraw)
 PRODUCT_STEAM_VIRTUAL_PAD = 0x11FF   # Steam's emulated "X-Box 360 pad N"
 
-# --- Steam Deck raw report ----------------------------------------------------
-# Layout confirmed in two independent drivers:
-#   Linux drivers/hid/hid-steam.c   steam_raw_event(): size 64, data[0]==1, data[1]==0,
-#                                   data[2]==9 (ID_CONTROLLER_DECK_STATE)
-#   SDL src/joystick/hidapi/steam/controller_structs.h: header = u16 version(1),
-#                                   u8 type(9), u8 length(64); then u32 packet
-#                                   number; then u64 button bits (little endian)
-# i.e. the 64-bit button mask is at bytes 8..15 of the 64-byte report.
+# --- Valve controllers (raw HID) -----------------------------------------------
+# USB ids: Linux drivers/hid/hid-ids.h and SDL src/joystick/usb_ids.h.
+EVIOCGRAB = 0x40044590           # _IOW('E', 0x90, int), linux/input.h
+HID_MODELS = {
+    0x1205: ("deck", "Steam Deck controller"),
+    0x1102: ("sc", "Steam Controller"),
+    0x1142: ("sc", "Steam Controller (wireless dongle)"),
+    0x1302: ("triton", "Steam Controller (2026)"),         # kernel name: "Ibex"
+    0x1303: ("triton", "Steam Controller (2026, Bluetooth)"),
+    0x1304: ("triton", "Steam Controller (2026 dongle)"),
+    0x1305: ("triton", "Steam Controller (2026 dongle)"),
+}
+
+# Steam Deck. hid-steam.c steam_raw_event(): size 64, data[0]==1, data[1]==0,
+# data[2]==9 (ID_CONTROLLER_DECK_STATE). SDL controller_structs.h: u16 version(1),
+# u8 type(9), u8 length, u32 packet number, then a u64 button mask (little endian):
+# the mask is at bytes 8..15. hid-steam.c steam_deck_button_mappings[] ({byte, bit}
+# with bit = (byte - 8) * 8 + bit_in_byte) matches SDL's STEAMDECK_LBUTTON_* /
+# STEAMDECK_HBUTTON_* (high word shifted by 32) on every entry.
 DECK_REPORT_LEN = 64
 DECK_BUTTON_OFFSET = 8
-# bit -> name. hid-steam.c steam_deck_button_mappings[] gives {byte, bit}; with
-# bit = (byte - 8) * 8 + bit_in_byte it matches SDL's STEAMDECK_LBUTTON_* /
-# STEAMDECK_HBUTTON_* (high word shifted by 32) on every entry.
 DECK_BUTTONS = {
     0: "R2", 1: "L2", 2: "R1", 3: "L1",
     4: "Y", 5: "B", 6: "X", 7: "A",
@@ -68,6 +84,41 @@ DECK_BUTTONS = {
     22: "L3", 26: "R3",
     41: "L4", 42: "R4",
     50: "QAM",
+}
+
+# Original Steam Controller (2015). Same 64-byte framing, data[2]==1 is the input
+# state, and the 24-bit button mask is at bytes 8..10 (hid-steam.c
+# steam_controller_button_mappings[], cross-checked with SDL_hidapi_steam.c
+# STEAM_*_MASK). Its two rear grips are the Steam "back" buttons, named L5/R5 like
+# on the Deck. Bit 23 means "left pad and joystick in use": then the left pad
+# click bit is really the stick click (SDL does the same swap).
+SC_BUTTON_OFFSET = 8
+SC_BUTTONS = {
+    0: "R2", 1: "L2", 2: "R1", 3: "L1",
+    4: "Y", 5: "B", 6: "X", 7: "A",
+    8: "D-pad Up", 9: "D-pad Right", 10: "D-pad Left", 11: "D-pad Down",
+    12: "View", 13: "Guide", 14: "Menu",
+    15: "L5", 16: "R5",
+    17: "Left pad click", 18: "Right pad click",
+    22: "L3",
+}
+SC_PAD_AND_STICK_BIT = 23
+
+# Steam Controller (2026), kernel "Ibex" / SDL "Triton". Report id in byte 0 (0x42
+# USB, 0x45 Bluetooth, 0x47 timestamped), byte 1 sequence number, then a u32 button
+# mask at bytes 2..5. hid-steam.c steam_ibex_button_mappings[] ({byte, bit}, bit =
+# (byte - 2) * 8 + bit_in_byte), SDL TRITON_*BUTTON_* and measurements on a real
+# device (Steamcord) agree on every entry. The kernel and SDL swap the names of
+# the two small buttons (bits 6 and 14); SDL's names (Valve's own) are used.
+TRITON_STATE_REPORTS = (0x42, 0x45, 0x47)
+TRITON_WIRELESS_STATUS = 0x79        # byte 1: 1 = disconnected
+TRITON_BUTTON_OFFSET = 2
+TRITON_BUTTONS = {
+    0: "A", 1: "B", 2: "X", 3: "Y",
+    4: "QAM", 5: "R3", 6: "View", 7: "R4", 8: "R5", 9: "R1",
+    10: "D-pad Down", 11: "D-pad Right", 12: "D-pad Left", 13: "D-pad Up",
+    14: "Menu", 15: "L3", 16: "Guide", 17: "L4", 18: "L5", 19: "L1",
+    22: "Right pad click", 23: "R2", 26: "Left pad click", 27: "L2",
 }
 
 # --- generic gamepads (evdev), kernel BTN_* -> the same names as above ----------
@@ -169,13 +220,43 @@ def warnings_for(tokens) -> list:
 # ---------------------------------------------------------------------------
 # parsing (pure functions, unit-tested without any device)
 # ---------------------------------------------------------------------------
-def parse_deck_report(data: bytes):
-    """Held button names from a Deck state report, or None if it is not one."""
-    if (len(data) != DECK_REPORT_LEN or data[0] != 1 or data[1] != 0
-            or data[2] != 9 or data[3] != DECK_REPORT_LEN):
+def _mask_to_tokens(mask: int, table: dict) -> frozenset:
+    return frozenset(pad_token(name) for bit, name in table.items() if mask >> bit & 1)
+
+
+def parse_hid_report(model: str, data: bytes):
+    """Held button tokens from a raw report of the given controller model, or None
+    when the report is not a button state (battery, status, other interfaces)."""
+    if model == "deck":
+        if len(data) != DECK_REPORT_LEN or data[0] != 1 or data[1] != 0 or data[2] != 9:
+            return None
+        mask = int.from_bytes(data[DECK_BUTTON_OFFSET:DECK_BUTTON_OFFSET + 8], "little")
+        return _mask_to_tokens(mask, DECK_BUTTONS)
+    if model == "sc":
+        if len(data) != 64 or data[0] != 1 or data[1] != 0:
+            return None
+        if data[2] == 1:
+            mask = int.from_bytes(data[SC_BUTTON_OFFSET:SC_BUTTON_OFFSET + 3], "little")
+            held = set(_mask_to_tokens(mask, SC_BUTTONS))
+            if mask >> SC_PAD_AND_STICK_BIT & 1 and pad_token("Left pad click") in held:
+                held.discard(pad_token("Left pad click"))
+                held.add(pad_token("L3"))
+            return frozenset(held)
+        if data[2] == 3 and data[4] == 1:       # wireless: controller went away
+            return frozenset()
         return None
-    mask = int.from_bytes(data[DECK_BUTTON_OFFSET:DECK_BUTTON_OFFSET + 8], "little")
-    return frozenset(pad_token(name) for bit, name in DECK_BUTTONS.items() if mask >> bit & 1)
+    if model == "triton":
+        if len(data) >= 2 and data[0] == TRITON_WIRELESS_STATUS:
+            return frozenset() if data[1] == 1 else None
+        if len(data) >= 6 and data[0] in TRITON_STATE_REPORTS:
+            mask = int.from_bytes(data[TRITON_BUTTON_OFFSET:TRITON_BUTTON_OFFSET + 4], "little")
+            return _mask_to_tokens(mask, TRITON_BUTTONS)
+        return None
+    return None
+
+
+def parse_deck_report(data: bytes):
+    return parse_hid_report("deck", data)
 
 
 def _proc_bit(bitmap: str, bit: int) -> bool:
@@ -229,15 +310,17 @@ def parse_proc_devices(text: str) -> list:
             kind = "keyboard"
         elif _proc_bit(keybits, BTN_LEFT) and _proc_bit(keybits, BTN_RIGHT) and _proc_bit(evbits, EV_REL):
             kind = "mouse"
+        raw_kind = kind
         if vendor == VENDOR_VALVE and not (kind == "pad" and product == PRODUCT_STEAM_VIRTUAL_PAD):
             kind = None
-        out.append({"name": name, "vendor": vendor, "product": product, "event": event, "kind": kind})
+        out.append({"name": name, "vendor": vendor, "product": product, "event": event,
+                    "kind": kind, "raw_kind": raw_kind})
     return out
 
 
-def deck_hidraw_nodes(sys_root: str = "/sys") -> list:
-    """hidraw node names (e.g. 'hidraw2') that belong to a Steam Deck controller."""
-    out = []
+def valve_hid_nodes(sys_root: str = "/sys"):
+    """Valve hidraw nodes: ({node: (model, name)}, [unrecognised 'vendor:product', ...])."""
+    known, unknown = {}, []
     for dev in sorted(glob.glob(os.path.join(sys_root, "class/hidraw/hidraw*"))):
         try:
             with open(os.path.join(dev, "device", "uevent")) as f:
@@ -245,19 +328,27 @@ def deck_hidraw_nodes(sys_root: str = "/sys") -> list:
         except OSError:
             continue
         m = re.search(r"^HID_ID=[0-9A-Fa-f]+:([0-9A-Fa-f]+):([0-9A-Fa-f]+)$", uevent, re.M)
-        if m and int(m.group(1), 16) == VENDOR_VALVE and int(m.group(2), 16) == PRODUCT_DECK:
-            out.append(os.path.basename(dev))
-    return out
+        if not m or int(m.group(1), 16) != VENDOR_VALVE:
+            continue
+        product = int(m.group(2), 16)
+        node = os.path.basename(dev)
+        if product in HID_MODELS:
+            known[node] = HID_MODELS[product]
+        else:
+            ident = f"28de:{product:04x}"
+            if ident not in unknown:
+                unknown.append(ident)
+    return known, unknown
 
 
 # ---------------------------------------------------------------------------
 # the hub
 # ---------------------------------------------------------------------------
 class _Source:
-    __slots__ = ("fd", "key", "kind", "name", "held")
+    __slots__ = ("fd", "key", "kind", "name", "held", "keep")
 
-    def __init__(self, fd, key, kind, name=""):
-        self.fd, self.key, self.kind, self.name = fd, key, kind, name
+    def __init__(self, fd, key, kind, name="", keep=False):
+        self.fd, self.key, self.kind, self.name, self.keep = fd, key, kind, name, keep
         self.held = set()
 
 
@@ -284,6 +375,11 @@ class InputHub:
         self._timer = None
         self._capture = None
         self._unreadable = 0
+        self._unrecognized = []
+        self._emulated = []          # Valve's emulated keyboard/mouse: held only while capturing
+        self._extra = {}             # fd -> key, opened just to hold them during a capture
+        self._ui_held = frozenset()
+        self._ui_timer = None
 
     # ----- configuration -----
     def set_activator(self, tokens):
@@ -316,6 +412,7 @@ class InputHub:
         if self._timer:
             self._timer.cancel()
             self._timer = None
+        self._release_grabs()
         for fd in list(self._sources):
             self._drop(fd)
         was_active = self._active
@@ -339,23 +436,27 @@ class InputHub:
 
     # ----- devices -----
     def _discover(self):
-        """{node: (kind, name)} for everything we want to read."""
+        """{key: (kind, name)} for everything we want to read. kind is keyboard, mouse,
+        pad or a Valve model (deck / sc / triton)."""
         found = {}
         try:
             with open(self._proc_path, encoding="utf-8", errors="replace") as f:
                 devices = parse_proc_devices(f.read())
         except OSError:
             devices = []
-        decks = deck_hidraw_nodes(self._sys_root)
-        for node in decks:
-            found[node] = ("deck", "Steam Deck controller")
+        known, self._unrecognized = valve_hid_nodes(self._sys_root)
+        for node, (model, name) in known.items():
+            found[node] = (model, name)
+        self._emulated = []
         for d in devices:
+            if d["vendor"] == VENDOR_VALVE and d.get("raw_kind") in ("keyboard", "mouse"):
+                self._emulated.append("input/" + d["event"])
             if not d["kind"]:
                 continue
-            # With the Deck's own controller covered by hidraw, Steam's emulated pad
+            # With a Valve controller covered by its raw reports, Steam's emulated pad
             # would only echo remapped output; ignore it. For other controllers that
             # Steam has taken over it is the only way to see their buttons.
-            if d["vendor"] == VENDOR_VALVE and decks:
+            if d["vendor"] == VENDOR_VALVE and known:
                 continue
             found["input/" + d["event"]] = (d["kind"], d["name"])
         return found
@@ -364,7 +465,7 @@ class InputHub:
         wanted = self._discover()          # {key: (kind, name)}; key like "input/event3" or "hidraw2"
         changed = False
         for fd, src in list(self._sources.items()):
-            if src.key not in wanted:
+            if src.key not in wanted and not src.keep:
                 self._drop(fd)
                 changed = True
         have = {s.key for s in self._sources.values()}
@@ -381,10 +482,11 @@ class InputHub:
         if changed:
             self._recompute()
 
-    def add_source(self, fd, key, kind, name=""):
-        """Register an already-open descriptor (also used by the tests)."""
+    def add_source(self, fd, key, kind, name="", keep=False):
+        """Register an already-open descriptor. keep=True stops a rescan from
+        dropping it (used by the tests for synthetic devices)."""
         os.set_blocking(fd, False)
-        self._sources[fd] = _Source(fd, key, kind, name)
+        self._sources[fd] = _Source(fd, key, kind, name, keep)
         try:
             self._loop.add_reader(fd, self._readable, fd)
         except Exception:
@@ -410,7 +512,7 @@ class InputHub:
         changed = False
         while True:
             try:
-                data = os.read(fd, EVENT.size * 64 if src.kind != "deck" else 256)
+                data = os.read(fd, EVENT.size * 64 if not self._is_hid(src) else 256)
             except BlockingIOError:
                 break
             except OSError:
@@ -421,8 +523,8 @@ class InputHub:
                 return
             if not data:
                 break
-            if src.kind == "deck":
-                held = parse_deck_report(data)
+            if self._is_hid(src):
+                held = parse_hid_report(src.kind, data)
                 if held is not None and held != src.held:
                     src.held = set(held)
                     changed = True
@@ -430,6 +532,10 @@ class InputHub:
                 changed = True
         if changed:
             self._recompute()
+
+    @staticmethod
+    def _is_hid(src) -> bool:
+        return src.kind in ("deck", "sc", "triton")
 
     def _parse_evdev(self, src, data) -> bool:
         changed = False
@@ -477,7 +583,7 @@ class InputHub:
 
     # ----- activator + capture -----
     def _recompute(self):
-        held = set()
+        held = set(self._ui_held)
         for src in self._sources.values():
             held |= src.held
         self._held = frozenset(held)
@@ -496,6 +602,8 @@ class InputHub:
         """Record the next combination the user holds and then releases."""
         self.cancel_capture()
         self.start()
+        self.rescan()
+        self._grab_all()
         self._capture = {
             "state": "active", "pre": set(self._held), "t0": time.monotonic(),
             "acc": set(), "tokens": [], "on_done": on_done,
@@ -530,6 +638,7 @@ class InputHub:
         cb = cap.get("on_done")
         if state == "done" and cb:
             cb(cap["tokens"])
+        self._release_grabs()
         # while capturing, the activator was ignored; resume from the current state
         self._active = bool(self._activator) and self._activator <= self._held
         self._maybe_stop()
@@ -541,14 +650,80 @@ class InputHub:
         seen = cap["acc"] if cap["state"] == "active" else cap["tokens"]
         return {"state": cap["state"], "tokens": valid_tokens(seen), "label": describe(valid_tokens(seen))}
 
+    # ----- exclusive hold while recording an activator -----
+    @staticmethod
+    def _grab(fd, on: bool) -> bool:
+        try:
+            fcntl.ioctl(fd, EVIOCGRAB, 1 if on else 0)
+            return True
+        except OSError:
+            return False          # not an evdev node, or another program holds it
+
+    def _grab_all(self):
+        """Hold keyboards/mice/gamepads (and Valve's emulated keyboard/mouse) so the
+        system does not react to the keys pressed while recording. Hidraw devices
+        (Deck, Steam Controllers) cannot be held; Steam itself still sees those."""
+        for src in self._sources.values():
+            if not self._is_hid(src):
+                self._grab(src.fd, True)
+        have = {s.key for s in self._sources.values()}
+        for key in self._emulated:
+            if key in have or key in self._extra.values():
+                continue
+            try:
+                fd = os.open(os.path.join(self._dev_root, key), os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            except OSError:
+                continue
+            if self._grab(fd, True):
+                self._extra[fd] = key
+            else:
+                os.close(fd)
+
+    def _release_grabs(self):
+        for fd, src in list(self._sources.items()):
+            if not self._is_hid(src):
+                self._grab(fd, False)
+        for fd in list(self._extra):
+            self._grab(fd, False)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._extra.clear()
+
+    # ----- Steam interface feed -----
+    UI_TTL_S = 2.5
+
+    def set_ui_held(self, tokens):
+        """Buttons currently held according to the Steam interface (sent by the
+        panel, with a heartbeat while something is held). Expires if updates stop,
+        so a lost message can never leave a button stuck."""
+        toks = frozenset(t for t in valid_tokens(tokens) if t.startswith("pad:"))
+        if self._ui_timer:
+            self._ui_timer.cancel()
+            self._ui_timer = None
+        if toks:
+            self._ui_timer = self._loop.call_later(self.UI_TTL_S, self.set_ui_held, [])
+        if toks == self._ui_held:
+            return
+        self._ui_held = toks
+        if self._running:
+            self._recompute()
+
     # ----- diagnostics -----
     def status(self):
         kinds = [s.kind for s in self._sources.values()]
+        controllers = [s.name for s in self._sources.values() if self._is_hid(s)]
+        names = []
+        for n in controllers:                 # a controller exposes several raw interfaces
+            if n not in names:
+                names.append(n)
         return {
             "running": self._running,
             "keyboards": kinds.count("keyboard"),
             "mice": kinds.count("mouse"),
             "pads": kinds.count("pad"),
-            "deck": kinds.count("deck") > 0,
+            "controllers": names,
             "unreadable": self._unreadable,
+            "unrecognized": list(self._unrecognized),
         }

@@ -9,6 +9,9 @@ import {
   definePlugin,
 } from "@decky/ui";
 import { Component, ReactNode, useEffect, useRef, useState } from "react";
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+declare const SteamClient: any;
 import { FaMicrophone } from "react-icons/fa";
 
 // ---------- types ----------
@@ -21,7 +24,10 @@ interface LastResult {
   ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number; by?: string;
 }
 interface DictState { phase: Phase; last: LastResult | null; activator_held: boolean }
-interface Watching { running: boolean; keyboards: number; mice: number; pads: number; deck: boolean; unreadable: number }
+interface Watching {
+  running: boolean; keyboards: number; mice: number; pads: number;
+  controllers: string[]; unreadable: number; unrecognized: string[];
+}
 interface ActivatorInfo { tokens: string[]; label: string; warnings: string[]; watching: Watching }
 interface CaptureStatus { state: "idle" | "active" | "done" | "timeout" | "cancelled"; tokens: string[]; label: string; warnings?: string[] }
 interface BuildInfo { version: string; build: string }
@@ -54,9 +60,47 @@ const startCapture = callable<[], { ok: boolean; error?: string }>("start_captur
 const captureStatus = callable<[], CaptureStatus>("capture_status");
 const cancelCapture = callable<[], boolean>("cancel_capture");
 const clearActivator = callable<[], { ok: boolean }>("clear_activator");
+const setUiPad = callable<[string[]], boolean>("set_ui_pad");
 const logBackend = callable<[string], boolean>("log");
 
 // ---------- panel ----------
+
+// ---------- Steam interface controller feed ----------
+// Forwards the buttons Steam reports (works for any controller Steam supports, but
+// only while the Steam interface is active, not in a game) to the backend, which
+// reads the controllers' raw data for in-game use. Steam's callback changed shape
+// between builds: older builds pass an array of {nA: button, bS: pressed}, newer
+// ones pass (controllerIndex, button, pressed). Both are handled, and the
+// subscription is renewed after sleep because the feed stops delivering then.
+const STEAM_ID_NAMES: Record<number, string> = {
+  0: "A", 1: "B", 2: "X", 3: "Y",
+  4: "D-pad Up", 5: "D-pad Right", 6: "D-pad Down", 7: "D-pad Left",
+  8: "Menu", 9: "View", 25: "L3", 41: "R3",
+  28: "L2", 29: "R2", 30: "L1", 31: "R1",
+  32: "L5", 33: "R5", 44: "L4", 45: "R4",
+  34: "Guide", 35: "View", 36: "Menu",
+  37: "Left pad click", 39: "Right pad click",
+};
+const uiHeld = new Set<string>();
+let uiHeartbeat: ReturnType<typeof setInterval> | null = null;
+
+function pushUi() {
+  void setUiPad([...uiHeld]);
+  if (uiHeld.size && !uiHeartbeat) uiHeartbeat = setInterval(() => void setUiPad([...uiHeld]), 1000);
+  if (!uiHeld.size && uiHeartbeat) {
+    clearInterval(uiHeartbeat);
+    uiHeartbeat = null;
+  }
+}
+
+function uiButton(id: number, down: boolean) {
+  const name = STEAM_ID_NAMES[id];
+  if (!name) return;
+  const token = `pad:${name}`;
+  if (down) uiHeld.add(token);
+  else uiHeld.delete(token);
+  pushUi();
+}
 
 // Remembers the model being browsed, even if the panel is rebuilt.
 let lastChoice = "";
@@ -228,11 +272,10 @@ function Panel() {
 
   const watchText = (w?: Watching) => {
     if (!w || !w.running) return "Not reading any devices (no activator set)";
-    const parts: string[] = [];
-    if (w.deck) parts.push("Steam Deck controller");
-    if (w.keyboards) parts.push(`${w.keyboards} keyboard${w.keyboards > 1 ? "s" : ""}`);
+    const parts: string[] = [...(w.controllers ?? [])];
+    if (w.keyboards) parts.push(w.keyboards > 1 ? `${w.keyboards} keyboards` : "1 keyboard");
     if (w.mice) parts.push(w.mice > 1 ? `${w.mice} mice` : "1 mouse");
-    if (w.pads) parts.push(`${w.pads} controller${w.pads > 1 ? "s" : ""}`);
+    if (w.pads) parts.push(w.pads > 1 ? `${w.pads} other controllers` : "1 other controller");
     const text = parts.length ? parts.join(", ") : "no devices found";
     return w.unreadable ? `${text} (${w.unreadable} could not be opened)` : text;
   };
@@ -341,7 +384,7 @@ function Panel() {
             <PanelSectionRow>
               <Field
                 label="Listening..."
-                description="Press and hold your keys or buttons together, then let go. Works for keyboard, mouse and controller."
+                description="Press and hold your keys or buttons together, then let go. Your keyboard and mouse are paused while listening so they do not click anything."
               >
                 {cap?.label || "waiting for input"}
               </Field>
@@ -371,6 +414,14 @@ function Panel() {
             >
               Clear activator
             </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {(act?.watching?.unrecognized ?? []).length > 0 && (
+          <PanelSectionRow>
+            <Field label="Note">
+              Found Valve device {(act?.watching?.unrecognized ?? []).join(", ")} that this plugin cannot read yet.
+              Buttons still work while the Steam menu is open.
+            </Field>
           </PanelSectionRow>
         )}
         {(act?.warnings ?? []).map((w) => (
@@ -488,13 +539,71 @@ class Boundary extends Component<{ children?: ReactNode }, { err: string | null 
   }
 }
 
-export default definePlugin(() => ({
-  name: "Ubermoc Speech",
-  titleView: <div>Ubermoc Speech</div>,
-  content: (
-    <Boundary>
-      <Panel />
-    </Boundary>
-  ),
-  icon: <FaMicrophone />,
-}));
+export default definePlugin(() => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const input = (typeof SteamClient !== "undefined" && (SteamClient as any)?.Input) || null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let reg: any = null;
+
+  const unregister = () => {
+    try {
+      if (typeof reg === "function") reg();
+      else reg?.unregister?.();
+    } catch {
+      /* ignore */
+    }
+    reg = null;
+  };
+  const register = () => {
+    unregister();
+    if (typeof input?.RegisterForControllerInputMessages !== "function") return;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      reg = input.RegisterForControllerInputMessages((...args: any[]) => {
+        try {
+          if (Array.isArray(args[0])) {
+            for (const e of args[0]) if (typeof e?.nA === "number") uiButton(e.nA, !!e.bS);
+          } else if (typeof args[1] === "number") {
+            uiButton(args[1], !!args[2]);
+          }
+        } catch {
+          /* the Steam callback swallows exceptions; never let one break the feed */
+        }
+      });
+    } catch (e) {
+      void logBackend(`controller feed failed: ${e}`);
+    }
+  };
+  register();
+
+  // The feed stops after the machine sleeps; a long gap between ticks means it did.
+  let lastTick = Date.now();
+  const resume = setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastTick;
+    lastTick = now;
+    if (gap > 30000) {
+      uiHeld.clear();
+      pushUi();
+      register();
+    }
+  }, 10000);
+
+  return {
+    name: "Ubermoc Speech",
+    titleView: <div>Ubermoc Speech</div>,
+    content: (
+      <Boundary>
+        <Panel />
+      </Boundary>
+    ),
+    icon: <FaMicrophone />,
+    onDismount() {
+      clearInterval(resume);
+      unregister();
+      uiHeld.clear();
+      if (uiHeartbeat) clearInterval(uiHeartbeat);
+      uiHeartbeat = null;
+    },
+  };
+});
