@@ -533,7 +533,7 @@ class Capture(unittest.TestCase):
     def start(self, grace_passed=True):
         self.e.hub.begin_capture(timeout=5, on_done=self.done.append)
         if grace_passed:
-            self.e.hub._capture["t0"] -= 1.0                     # skip the start-click grace period
+            self.e.hub._capture["t0"] -= self.e.hub.GRACE_S + 0.05   # skip only the start-click grace period
 
     def test_records_combination_on_release(self):
         self.start()
@@ -588,6 +588,71 @@ class Capture(unittest.TestCase):
         self.e.send("kbd", ev(1, 67, 0))
         self.assertEqual(self.done, [["key:67"]])
         self.assertEqual(calls, [])
+
+
+class StartButton(unittest.TestCase):
+    """The button used to start a recording: a tap is ignored, a deliberate use counts."""
+
+    def setUp(self):
+        self.e = _Env()
+        self.e.add("deck", "deck")
+        self.done = []
+
+    def tearDown(self):
+        self.e.close()
+
+    def begin(self, held_at_start=True):
+        if held_at_start:
+            self.e.send("deck", deck_report(7))                       # A is down (it tapped "Record")
+        self.e.hub.begin_capture(timeout=5, on_done=self.done.append, purpose="before")
+        self.e.hub._capture["t0"] -= self.e.hub.GRACE_S + 0.05       # past the start-click grace period
+
+    def test_a_tap_of_the_start_button_records_nothing(self):
+        self.begin()
+        self.e.send("deck", deck_report())                           # released quickly
+        self.assertEqual(self.e.hub.capture_status()["state"], "active")
+        self.assertEqual(self.done, [])
+
+    def test_pressing_it_again_counts(self):
+        self.begin()
+        self.e.send("deck", deck_report())
+        self.e.send("deck", deck_report(7))                          # a fresh A press
+        self.e.send("deck", deck_report())
+        self.assertEqual(self.done, [["pad:A"]])
+
+    def test_holding_it_long_enough_counts(self):
+        self.begin()
+        self.e.hub._capture["t0"] -= self.e.hub.HOLD_PROMOTE_S       # still held after the threshold
+        self.e.hub._capture_promote()                                # (the timer does this)
+        self.assertEqual(self.e.hub.capture_status()["label"], "A")
+        self.e.send("deck", deck_report())
+        self.assertEqual(self.done, [["pad:A"]])
+
+    def test_holding_it_with_other_inputs_makes_a_combination(self):
+        self.begin()
+        self.e.send("deck", deck_report(7, 42))                      # R4 pressed while A is still down
+        self.assertEqual(self.e.hub.capture_status()["tokens"], ["pad:R4"])   # not yet: A may only be the tap
+        self.e.hub._capture["t0"] -= self.e.hub.HOLD_PROMOTE_S
+        self.e.hub._capture_promote()                                # A was held on purpose
+        self.e.send("deck", deck_report())
+        self.assertEqual(self.done, [["pad:A", "pad:R4"]])
+
+    def test_a_tap_followed_quickly_by_other_buttons_does_not_record_the_tap(self):
+        self.begin()
+        self.e.send("deck", deck_report(7, 42))                      # A still down for a moment...
+        self.e.send("deck", deck_report(42))                         # ...then released
+        self.e.send("deck", deck_report())
+        self.assertEqual(self.done, [["pad:R4"]])
+
+    def test_the_hold_timer_is_cancelled_with_the_recording(self):
+        self.begin()
+        timer = self.e.hub._capture["promote_timer"]
+        self.e.hub.cancel_capture()
+        self.assertTrue(timer.cancelled())
+
+    def test_no_timer_when_nothing_was_held(self):
+        self.begin(held_at_start=False)
+        self.assertNotIn("promote_timer", self.e.hub._capture)
 
 
 class CapturePurpose(unittest.TestCase):

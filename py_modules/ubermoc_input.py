@@ -366,6 +366,7 @@ class InputHub:
     """
 
     GRACE_S = 0.25          # presses this soon after capture starts are the click that started it
+    HOLD_PROMOTE_S = 0.6    # ...unless that button is kept held this long: then the user means it
     RESCAN_S = 10.0         # pick up hot-plugged / renumbered devices (also after resume)
 
     def __init__(self, loop, on_change, proc_path="/proc/bus/input/devices",
@@ -623,17 +624,34 @@ class InputHub:
             "acc": set(), "tokens": [], "on_done": on_done, "purpose": purpose,
             "timer": self._loop.call_later(timeout, self._capture_timeout),
         }
+        if self._capture["pre"]:
+            self._capture["promote_timer"] = self._loop.call_later(self.HOLD_PROMOTE_S + 0.02, self._capture_promote)
 
     def _capture_step(self):
+        """Work out what the user is pressing for the recording.
+
+        The press that started the recording (e.g. the A that tapped "Record") is
+        ignored, so a tap does not record itself. It does count when the user means
+        it: pressing it again after letting go is a fresh press, and keeping it held
+        for HOLD_PROMOTE_S (alone or together with other inputs) makes it part of
+        the combination."""
         cap = self._capture
         cap["pre"] &= self._held                    # released => no longer excluded
         fresh = set(self._held) - cap["pre"]
-        if time.monotonic() - cap["t0"] < self.GRACE_S:
+        now = time.monotonic()
+        if now - cap["t0"] < self.GRACE_S:
             cap["pre"] |= fresh                     # the click that started the capture
             fresh = set()
+        if cap["pre"] and now - cap["t0"] >= self.HOLD_PROMOTE_S:
+            cap["acc"] |= cap["pre"]                # held on purpose, not just a tap
+            cap["pre"] = set()
         cap["acc"] |= fresh
         if cap["acc"] and not (set(self._held) - cap["pre"]):
             self._finish_capture("done")
+
+    def _capture_promote(self):
+        if self._capture_active():
+            self._capture_step()
 
     def _capture_timeout(self):
         if self._capture_active():
@@ -646,8 +664,9 @@ class InputHub:
     def _finish_capture(self, state):
         cap = self._capture
         cap["state"] = state
-        if cap.get("timer"):
-            cap["timer"].cancel()
+        for name in ("timer", "promote_timer"):
+            if cap.get(name):
+                cap[name].cancel()
         cap["tokens"] = valid_tokens(cap["acc"]) if state == "done" else []
         cb = cap.get("on_done")
         if state == "done" and cb:

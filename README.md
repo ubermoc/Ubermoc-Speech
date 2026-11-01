@@ -48,8 +48,15 @@ receiving all input).
 
 While an input is being recorded, keyboards, mice and evdev gamepads (and Valve's emulated
 keyboard/mouse) are held exclusively (EVIOCGRAB) so the system does not react to what is
-pressed; the hold lasts at most ~15 s. Controllers read through raw HID cannot be held, so
-Steam still moves its menu with them.
+pressed; the hold lasts at most ~15 s. Controllers read through raw HID cannot be held by
+the plugin, so the menu instead shows a "listening" box that takes focus and consumes every
+controller press (`stopPropagation()` + `preventDefault()` in `onButtonDown`, `true` from
+`onGamepadDirection`: the same calls Valve's own interface code makes), so a press cannot
+click Cancel, move the menu or close it. It has no button a controller could press; touch or
+mouse cancels it, and it stops by itself after 15 s.
+
+The button you tapped to start recording is ignored when it is only tapped (so the tap does
+not record itself), but it counts when you press it again, or keep it held for 0.6 s.
 
 Privacy: devices are opened only while an activator is set or being recorded; no key or
 button is logged, and only the inputs you choose are stored.

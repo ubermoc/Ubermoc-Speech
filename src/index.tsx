@@ -3,6 +3,7 @@ import {
   ButtonItem,
   DropdownItem,
   Field,
+  Focusable,
   PanelSection,
   PanelSectionRow,
   ProgressBarWithInfo,
@@ -130,6 +131,56 @@ let lastChoice = "";
 // Which groups are expanded; kept at module level so closing and reopening the menu keeps them.
 let openGroup: string | null = null;
 
+// While an input is being recorded, the menu must ignore the controller: a press would
+// otherwise click Cancel, move the focus or close the menu before it was recorded.
+// This box takes focus and consumes every controller press the way Steam's own
+// interface code does it (it calls stopPropagation() and preventDefault() in
+// onButtonDown, and returns true from onGamepadDirection). It has no button inside, so
+// nothing can be "pressed" by a controller. Touch or mouse (pointer events, which a
+// controller never produces) cancels; otherwise it stops by itself after 15 seconds.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const swallow = (e: any) => {
+  e?.stopPropagation?.();
+  e?.preventDefault?.();
+};
+const consumeDirection = (() => true) as unknown as () => void;
+
+function ListeningBox(props: { value: string; secondsLeft: number; onTouchCancel: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    ref.current?.focus?.();
+  }, []);
+  return (
+    <Focusable
+      ref={ref}
+      preferredFocus
+      noFocusRing
+      onButtonDown={swallow}
+      onButtonUp={swallow}
+      onOKButton={swallow}
+      onCancelButton={swallow}
+      onSecondaryButton={swallow}
+      onOptionsButton={swallow}
+      onGamepadDirection={consumeDirection}
+      onCancel={swallow}
+      onPointerUp={(e) => {
+        if (e.pointerType === "touch" || e.pointerType === "mouse") props.onTouchCancel();
+      }}
+      style={{ width: "100%", padding: "8px 0" }}
+    >
+      <div style={{ fontWeight: "bold" }}>Listening... {props.value || "waiting for input"}</div>
+      <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>
+        Press and hold your keys or buttons together, then let go. Works for keyboard, mouse and
+        controller. The menu ignores your controller while this is listening. To use the button you
+        tapped to start, press it again or keep holding it.
+      </div>
+      <div style={{ opacity: 0.8, fontSize: 12, marginTop: 4 }}>
+        Stops by itself in {props.secondsLeft} s. Touch here to cancel.
+      </div>
+    </Focusable>
+  );
+}
+
 function GroupHeader(props: { label: string; summary: string; open: boolean; onToggle: () => void }) {
   return (
     <PanelSection>
@@ -192,6 +243,8 @@ function Panel() {
   const [capTarget, setCapTarget] = useState<"activator" | "before" | "after" | null>(null);
   const capturing = capTarget === "activator";
   const [keyMsg, setKeyMsg] = useState<Record<string, string>>({});
+  const [capStart, setCapStart] = useState(0);
+  const [secondsLeft, setSecondsLeft] = useState(15);
   const [cap, setCap] = useState<CaptureStatus | null>(null);
   const [capMsg, setCapMsg] = useState("");
   const [typing, setTypingInfo] = useState<TypingInfo | null>(null);
@@ -252,6 +305,7 @@ function Panel() {
     if (!capTarget) return;
     const target = capTarget;
     const t = setInterval(async () => {
+      setSecondsLeft(Math.max(0, 15 - Math.floor((Date.now() - capStart) / 1000)));
       const c = await captureStatus();
       setCap(c);
       if (target === "activator") setAct(await getActivator());
@@ -271,7 +325,7 @@ function Panel() {
       }
     }, 300);
     return () => clearInterval(t);
-  }, [capTarget]);
+  }, [capTarget, capStart]);
 
   const downloaded = models.filter((m) => m.installed);
   const chosen = models.find((m) => m.name === choice);
@@ -347,7 +401,11 @@ function Panel() {
     setCapMsg("");
     setCap(null);
     const r = await startCapture();
-    if (r.ok) setCapTarget("activator");
+    if (r.ok) {
+      setCapStart(Date.now());
+      setSecondsLeft(15);
+      setCapTarget("activator");
+    }
     else setCapMsg(r.error ?? "Could not start listening");
   };
 
@@ -360,7 +418,11 @@ function Panel() {
     setKeyMsg((m) => ({ ...m, [which]: "" }));
     setCap(null);
     const r = await startKeyCapture(which);
-    if (r.ok) setCapTarget(which);
+    if (r.ok) {
+      setCapStart(Date.now());
+      setSecondsLeft(15);
+      setCapTarget(which);
+    }
     else setKeyMsg((m) => ({ ...m, [which]: r.error ?? "Could not start listening" }));
   };
 
@@ -391,10 +453,7 @@ function Panel() {
             </PanelSectionRow>
             {listening ? (
               <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => cancelCapture()}
-                  description="Press and hold your keys or buttons together, then let go. Works for keyboard, mouse and controller.">
-                  Listening... tap to cancel
-                </ButtonItem>
+                <ListeningBox value={cap?.label ?? ""} secondsLeft={secondsLeft} onTouchCancel={() => cancelCapture()} />
               </PanelSectionRow>
             ) : (
               <PanelSectionRow>
@@ -550,21 +609,9 @@ function Panel() {
           </Field>
         </PanelSectionRow>
         {capturing ? (
-          <>
-            <PanelSectionRow>
-              <Field
-                label="Listening..."
-                description="Press and hold your keys or buttons together, then let go. Your keyboard and mouse are paused while listening so they do not click anything."
-              >
-                {cap?.label || "waiting for input"}
-              </Field>
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => cancelCapture()}>
-                Cancel
-              </ButtonItem>
-            </PanelSectionRow>
-          </>
+          <PanelSectionRow>
+            <ListeningBox value={cap?.label ?? ""} secondsLeft={secondsLeft} onTouchCancel={() => cancelCapture()} />
+          </PanelSectionRow>
         ) : (
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={beginCapture} description={capMsg || undefined}>
