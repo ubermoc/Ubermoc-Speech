@@ -19,7 +19,7 @@ curl -L -o us.zip https://github.com/ubermoc/Ubermoc-Speech/releases/latest/down
 sudo unzip -o us.zip -d ~/homebrew/plugins/
 sudo systemctl restart plugin_loader
 ```
-After that, use the Update button in the panel.
+After that, use the Update button in the panel. It swaps the new files in without restarting Decky or Steam; then open Decky's plugin list (gear icon) and choose Reload for Ubermoc Speech to start using the new version.
 
 ## Models
 Pick a model, press Download, then select it under Current model. Models are kept in

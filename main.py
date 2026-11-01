@@ -904,9 +904,7 @@ class Plugin:
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"update apply failed: {e}")
             return {"ok": False, "error": str(e)}
-        # Restart Decky shortly so the new backend and frontend are loaded.
-        subprocess.Popen(
-            ["sh", "-c", "sleep 3; systemctl restart plugin_loader"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-        )
+        # No restart: the new files are in place. Decky loads them when the plugin is
+        # reloaded from its plugin list (the way the WoW add-on updater does it).
+        decky.logger.info(f"installed update {latest}; waiting for the plugin to be reloaded")
         return {"ok": True, "version": latest}

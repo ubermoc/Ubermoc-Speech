@@ -140,6 +140,8 @@ let lastChoice = "";
 let openGroup: string | null = null;
 // The app being edited in Applications; module level because Decky can re-create the panel.
 let editedApp = "";
+// An update was installed; the new version loads when the plugin is reloaded from Decky.
+let updateInstalled = "";
 
 // ---------- installed games and non-Steam apps ----------
 // Steam's own definition (its interface source): an installed Steam game is a Game whose
@@ -304,6 +306,7 @@ function Panel() {
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
+  const [updDone, setUpdDone] = useState(updateInstalled);
   const wasDownloading = useRef(false);
   const speedRef = useRef<Record<string, Speed>>({});
 
@@ -951,19 +954,21 @@ function Panel() {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            disabled={updBusy}
-            description={updMsg || (upd?.error ?? (upd?.available ? "A newer version is available" : "You are up to date"))}
+            disabled={updBusy || !!updDone}
+            description={updDone ? `v${updDone} installed. Open Decky's plugin list (the gear icon) and choose Reload for Ubermoc Speech to start using it.` : updMsg || (upd?.error ?? (upd?.available ? "A newer version is available" : "You are up to date"))}
             onClick={async () => {
               setUpdBusy(true);
               try {
                 if (upd?.available) {
                   setUpdMsg("Downloading and installing...");
                   const r = await installUpdate();
-                  setUpdMsg(
-                    r.ok
-                      ? "Updated. Decky is restarting - reopen this menu in a few seconds."
-                      : `Update failed: ${r.error ?? "unknown error"}`
-                  );
+                  if (r.ok) {
+                    updateInstalled = r.version ?? "new";
+                    setUpdDone(updateInstalled);
+                    setUpdMsg("");
+                  } else {
+                    setUpdMsg(`Update failed: ${r.error ?? "unknown error"}`);
+                  }
                 } else {
                   setUpdMsg("");
                   setUpd(await checkUpdate());
@@ -973,7 +978,7 @@ function Panel() {
               }
             }}
           >
-            {upd?.available ? "Install update" : "Check for updates"}
+            {updDone ? "Installed - reload the plugin" : upd?.available ? "Install update" : "Check for updates"}
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
