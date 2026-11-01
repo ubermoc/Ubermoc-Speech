@@ -104,14 +104,15 @@ class Plugin:
         return os.path.getsize(path) > MODELS[name][0] * 1024 * 1024 * 0.6
 
     def _selected(self) -> str:
+        """The model in use. Always a downloaded one, or "" if none is."""
         try:
             with open(os.path.join(self._data_dir(), "settings.json")) as f:
                 name = json.load(f).get("model")
-            if name in MODELS:
+            if name in MODELS and self._model_ok(name):
                 return name
         except (OSError, ValueError, AttributeError):
             pass
-        return DEFAULT_MODEL
+        return DEFAULT_MODEL if self._model_ok(DEFAULT_MODEL) else ""
 
     def _user_uid(self) -> int:
         try:
@@ -141,7 +142,7 @@ class Plugin:
             json.dump({"model": name}, f)
 
     async def download_model(self, name: str) -> dict:
-        """Download a model and, when finished, switch to it."""
+        """Download a model. It becomes the current model only when the user selects it."""
         if name not in MODELS:
             return {"ok": False, "error": "unknown model"}
         if name in self.download_progress:
@@ -186,9 +187,7 @@ class Plugin:
                 return {"ok": False, "error": str(e)}
             self.download_progress.pop(name, None)
         if self._model_ok(name):
-            self._save_selected(name)  # use it, even if the panel was closed meanwhile
-            await Plugin.stop_server(self)
-            return {"ok": True}
+            return {"ok": True}  # it is only used once the user selects it
         return {"ok": False, "error": "downloaded file looks incomplete"}
 
     async def cancel_download(self, name: str) -> bool:
@@ -211,8 +210,8 @@ class Plugin:
         if self.server_proc and self.server_proc.poll() is None:
             return {"ok": True}
         name = self._selected()
-        if not self._model_ok(name):
-            return {"ok": False, "error": f"model {name} is not downloaded"}
+        if not name:
+            return {"ok": False, "error": "no model selected; download one and select it first"}
         binary = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "whisper-server")
         if not os.path.exists(binary):
             return {"ok": False, "error": "whisper-server binary missing"}
