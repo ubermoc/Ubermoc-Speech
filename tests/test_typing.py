@@ -463,3 +463,23 @@ B: KEY={keys}
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SpokenSymbols(unittest.TestCase):
+    def test_conversions(self):
+        f = ut.spoken_symbols
+        self.assertEqual(f("C backslash users backslash Documents."), "C\\users\\Documents.")
+        self.assertEqual(f("Backslash."), "\\")
+        self.assertEqual(f("Back slash n"), "\\n")
+        self.assertEqual(f("email bob at sign example.com"), "email bob@example.com")
+        self.assertEqual(f("call foo open parenthesis x close parenthesis semicolon"), "call foo (x);")
+        self.assertEqual(f("a plus sign b equals sign c"), "a + b = c")
+        self.assertEqual(f("Hash tag winning, Dollar sign 5"), "# winning, $ 5")
+
+    def test_ordinary_words_are_left_alone(self):
+        for t in ("this is a pipe dream and a dot", "Meet me at the period piece, comma", "a star is born"):
+            self.assertEqual(ut.spoken_symbols(t), t)
+
+    def test_every_symbol_can_be_typed(self):
+        for _n, ch, _h in ut.SPOKEN_SYMBOLS:
+            self.assertIn(ch, ut.CHAR_MAP)

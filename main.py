@@ -429,11 +429,11 @@ class Plugin:
         has focus. Returns what happened, for the panel."""
         s = self._load_settings()
         if not force:
-            if not s.get("type_enabled", True):
-                return {"status": "off"}
             if time.time() - self.panel_seen < 1.5:
                 return {"status": "panel"}      # the menu is open: show the text there instead
         cleaned = ubermoc_typing.clean_for_typing(text)
+        if cleaned and s.get("type_symbols") == "symbols":
+            cleaned = ubermoc_typing.spoken_symbols(cleaned)
         if not cleaned:
             return {"status": "empty"}
         # Wait for the activator's own keys to be released, so a still-held Ctrl or
@@ -560,7 +560,7 @@ class Plugin:
         s = self._load_settings()
         available, reason = ubermoc_typing.VirtualKeyboard().check()
         return {
-            "enabled": bool(s.get("type_enabled", True)),
+            "symbols": "symbols" if s.get("type_symbols") == "symbols" else "words",
             "method": s.get("type_method") if s.get("type_method") in ("keyboard", "steam") else "keyboard",
             "speed": s.get("type_speed") if s.get("type_speed") in ubermoc_typing.TIMING else "normal",
             "keyboard": {"available": available, "reason": reason},
@@ -569,9 +569,9 @@ class Plugin:
             "test": self.last_typing_test,
         }
 
-    async def set_typing(self, enabled: bool, method: str, speed: str) -> dict:
+    async def set_typing(self, symbols: str, method: str, speed: str) -> dict:
         self._save_settings(
-            type_enabled=bool(enabled),
+            type_symbols="symbols" if symbols == "symbols" else "words",
             type_method=method if method in ("keyboard", "steam") else "keyboard",
             type_speed=speed if speed in ubermoc_typing.TIMING else "normal",
         )

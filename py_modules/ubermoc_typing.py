@@ -115,6 +115,60 @@ def clean_for_typing(text: str) -> str:
     return re.sub(r" {2,}", " ", text).strip()
 
 
+# ---------------------------------------------------------------------------
+# spoken symbols: "backslash" -> \
+# ---------------------------------------------------------------------------
+# Whisper writes a spoken symbol name as a word. In "symbols" mode the unambiguous
+# names are replaced by the character. Words that are ordinary English on their own
+# (dot, period, comma, colon, pipe, star, dash, quote) are left alone, and Whisper
+# already adds sentence punctuation itself. Each entry: (spoken name, character, how
+# it sits among the words). "join": no spaces around it (paths, e-mail, snake_case);
+# "open": space before, none after; "close": none before, space after; "after":
+# like a semicolon; "word": spaces are kept as spoken.
+SPOKEN_SYMBOLS = [
+    ("back slash", "\\", "join"), ("forward slash", "/", "join"), ("slash", "/", "join"),
+    ("underscore", "_", "join"), ("at sign", "@", "join"), ("tilde", "~", "join"),
+    ("caret", "^", "join"), ("hyphen", "-", "join"),
+    ("open parenthesis", "(", "open"), ("left parenthesis", "(", "open"),
+    ("open bracket", "[", "open"), ("left bracket", "[", "open"),
+    ("open brace", "{", "open"), ("open curly brace", "{", "open"), ("left brace", "{", "open"),
+    ("close parenthesis", ")", "close"), ("right parenthesis", ")", "close"),
+    ("close bracket", "]", "close"), ("right bracket", "]", "close"),
+    ("close brace", "}", "close"), ("close curly brace", "}", "close"), ("right brace", "}", "close"),
+    ("semi colon", ";", "after"),
+    ("ampersand", "&", "word"), ("asterisk", "*", "word"), ("plus sign", "+", "word"),
+    ("equals sign", "=", "word"), ("percent sign", "%", "word"), ("dollar sign", "$", "word"),
+    ("hash tag", "#", "word"), ("hash sign", "#", "word"), ("pound sign", "#", "word"),
+    ("vertical bar", "|", "word"), ("back tick", "`", "word"),
+    ("less than sign", "<", "word"), ("greater than sign", ">", "word"),
+]
+_SYMBOL_INFO = {}
+_alts = []
+for _name, _ch, _how in sorted(SPOKEN_SYMBOLS, key=lambda e: -len(e[0])):
+    _pat = r"[\s-]*".join(re.escape(w) for w in _name.split(" "))
+    _SYMBOL_INFO[_name] = (_ch, _how)
+    _alts.append(f"(?P<g{len(_alts)}>{_pat})")
+_SYMBOL_NAMES = [n for n, _c, _h in sorted(SPOKEN_SYMBOLS, key=lambda e: -len(e[0]))]
+_SYMBOL_RE = re.compile(r"(\s*)\b(?:" + "|".join(_alts) + r")\b[.,!?]?(\s*)", re.IGNORECASE)
+
+
+def spoken_symbols(text: str) -> str:
+    """Replace spoken symbol names ("backslash", "open parenthesis") by the symbol."""
+    def sub(m):
+        idx = next(int(k[1:]) for k, v in m.groupdict().items() if v is not None)
+        ch, how = _SYMBOL_INFO[_SYMBOL_NAMES[idx]]
+        before, after = m.group(1), m.group(m.re.groups)
+        if how == "join":
+            return ch
+        if how == "open":
+            return (" " if before else "") + ch
+        if how in ("close", "after"):
+            return ch + (" " if after else "")
+        return (" " if before else "") + ch + (" " if after else "")
+    out = _SYMBOL_RE.sub(sub, text)
+    return re.sub(r" +([;)\]}])", r"\1", out).strip()
+
+
 # Timing by the "typing speed" setting: (seconds between typed characters, seconds an
 # input pressed before/after the text is held, wait after the "before" input, wait
 # before the "after" input). An input held for only a few milliseconds is missed by

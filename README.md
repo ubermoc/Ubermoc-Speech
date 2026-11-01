@@ -7,7 +7,7 @@ server.
 
 The panel opens as four collapsible groups (one open at a time), with the update
 section always visible at the bottom:
-- **Global options**: the activator, what is pressed around the typed text, and Typing settings
+- **Global options**: the activator, what is pressed around the typed text, and Typing settings (spoken symbols, method, speed)
 - **Applications**: different before / after inputs for specific Steam and non-Steam apps
 - **Models**: Current model, Choose a model (download / delete)
 - **Testing**: record a test, see the text, test typing
@@ -74,6 +74,7 @@ When the activator is used, the transcription is typed into the focused field.
 - **Steam keyboard (gaming mode only)**: asks the Steam interface to type through
   `SteamClient.Input.ControllerKeyboardSendText`, the call Steam's own on-screen keyboard
   uses for games. It falls back to the virtual keyboard if Steam does not answer.
+- **Spoken symbols**: by default, saying "backslash" types the word. Set it to *Type the symbol* and it types `\`. Recognised names: back slash, forward slash, slash, underscore, at sign, hyphen, tilde, caret, open/close (or left/right) parenthesis, bracket and brace, semi colon, ampersand, asterisk, plus sign, equals sign, percent sign, dollar sign, hash tag, hash sign, pound sign, vertical bar, back tick, less than sign, greater than sign. Slashes, underscore, at sign, hyphen, tilde and caret join the neighbouring words (`C backslash users` becomes `C\users`). Plain words such as dot, period, comma, colon, pipe or star are left alone because they are ordinary English; Whisper already adds sentence punctuation.
 - While the panel is open the text is only shown there (so testing never types into the
   menu). "Test typing" types a sentence after 5 seconds, wherever you click.
 - Whisper annotations such as `[BLANK_AUDIO]` are dropped, typographic quotes/dashes are

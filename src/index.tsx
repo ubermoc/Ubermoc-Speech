@@ -8,7 +8,6 @@ import {
   PanelSectionRow,
   ProgressBarWithInfo,
   Router,
-  ToggleField,
   definePlugin,
 } from "@decky/ui";
 import { Component, ReactNode, useEffect, useRef, useState } from "react";
@@ -24,7 +23,7 @@ interface ModelInfo { name: string; size_mb: number; description: string; instal
 interface ModelList { selected: string; models: ModelInfo[] }
 interface DlProgress { done: number; total: number }
 interface TypedInfo {
-  status: "typed" | "panel" | "off" | "empty" | "error";
+  status: "typed" | "panel" | "empty" | "error";
   method?: string; typed?: number; skipped?: number; note?: string; error?: string;
   before?: string | null; after?: string | null; app?: string | null;
 }
@@ -37,7 +36,7 @@ interface LastResult {
   typed?: TypedInfo;
 }
 interface TypingInfo {
-  enabled: boolean;
+  symbols: "words" | "symbols";
   method: "keyboard" | "steam";
   speed: "fast" | "normal" | "slow";
   keyboard: { available: boolean; reason: string };
@@ -84,7 +83,7 @@ const cancelCapture = callable<[], boolean>("cancel_capture");
 const clearActivator = callable<[], { ok: boolean }>("clear_activator");
 const setUiPad = callable<[string[]], boolean>("set_ui_pad");
 const getTyping = callable<[], TypingInfo>("get_typing");
-const setTyping = callable<[boolean, string, string], TypingInfo>("set_typing");
+const setTyping = callable<[string, string, string], TypingInfo>("set_typing");
 const typeTest = callable<[number], { ok: boolean }>("type_test");
 const setKeyAction = callable<[string, string, string[], string], TypingInfo & OverridesInfo>("set_key_action");
 const startKeyCapture = callable<[string, string], { ok: boolean; error?: string }>("start_key_capture");
@@ -253,7 +252,6 @@ const typedText = (t?: TypedInfo | null): string => {
         (t.note ? ` - ${t.note}` : "")
       );
     case "panel": return "Not typed: this menu was open, so the text is only shown here";
-    case "off": return "Not typed: typing is turned off";
     case "empty": return "Nothing to type";
     default: return `Could not type: ${t.error ?? "unknown error"}`;
   }
@@ -542,9 +540,9 @@ function Panel() {
     );
   };
 
-  const applyTyping = async (patch: Partial<Pick<TypingInfo, "enabled" | "method" | "speed">>) => {
-    const cur = typing ?? { enabled: true, method: "keyboard", speed: "normal" };
-    setTypingInfo(await setTyping(patch.enabled ?? cur.enabled, patch.method ?? cur.method, patch.speed ?? cur.speed));
+  const applyTyping = async (patch: Partial<Pick<TypingInfo, "symbols" | "method" | "speed">>) => {
+    const cur = typing ?? { symbols: "words", method: "keyboard", speed: "normal" };
+    setTypingInfo(await setTyping(patch.symbols ?? cur.symbols, patch.method ?? cur.method, patch.speed ?? cur.speed));
   };
 
   const runTypingTest = async () => {
@@ -650,11 +648,19 @@ function Panel() {
 
       <PanelSection title="Typing">
         <PanelSectionRow>
-          <ToggleField
-            label="Type what I say"
-            description="Types into whatever has focus, in gaming mode and desktop mode. While this menu is open the text is only shown here."
-            checked={typing?.enabled ?? true}
-            onChange={(v) => applyTyping({ enabled: v })}
+          <DropdownItem
+            label="Spoken symbols"
+            description={
+              (typing?.symbols ?? "words") === "symbols"
+                ? 'Saying "backslash" types \\ . Also: forward slash, underscore, at sign, hyphen, open/close parenthesis, bracket and brace, semicolon, ampersand, asterisk, plus sign, equals sign, dollar sign, percent sign, hashtag, tilde, caret, vertical bar, backtick.'
+                : 'Saying "backslash" types the word backslash.'
+            }
+            rgOptions={[
+              { data: "words", label: "Type the word (backslash)" },
+              { data: "symbols", label: "Type the symbol (\\)" },
+            ]}
+            selectedOption={typing?.symbols ?? "words"}
+            onChange={(o) => applyTyping({ symbols: o.data as TypingInfo["symbols"] })}
           />
         </PanelSectionRow>
         <PanelSectionRow>
