@@ -607,27 +607,41 @@ class InputHub:
     def _capture_active(self):
         return bool(self._capture and self._capture["state"] == "active")
 
-    def begin_capture(self, timeout=15.0, on_done=None):
-        """Record the next combination the user holds and then releases."""
+    def begin_capture(self, timeout=15.0, on_done=None, kinds=None, purpose="activator"):
+        """Record the next combination the user holds and then releases.
+
+        kinds limits what counts, e.g. ("key",) records keyboard keys only (used for
+        the keys pressed around the typed text, where controller buttons and mouse
+        clicks make no sense and the button used to start recording must not leak in).
+        """
         self.cancel_capture()
         self.start()
         self.rescan()
         self._grab_all()
         self._capture = {
-            "state": "active", "pre": set(self._held), "t0": time.monotonic(),
-            "acc": set(), "tokens": [], "on_done": on_done,
+            "state": "active", "t0": time.monotonic(), "kinds": tuple(kinds) if kinds else None,
+            "acc": set(), "tokens": [], "on_done": on_done, "purpose": purpose,
             "timer": self._loop.call_later(timeout, self._capture_timeout),
         }
+        self._capture["pre"] = set(self._capture_held())
+
+    def _capture_held(self):
+        """Held inputs that count for the current capture."""
+        kinds = self._capture["kinds"] if self._capture else None
+        if not kinds:
+            return set(self._held)
+        return {t for t in self._held if t.partition(":")[0] in kinds}
 
     def _capture_step(self):
         cap = self._capture
-        cap["pre"] &= self._held                    # released => no longer excluded
-        fresh = set(self._held) - cap["pre"]
+        held = self._capture_held()
+        cap["pre"] &= held                          # released => no longer excluded
+        fresh = held - cap["pre"]
         if time.monotonic() - cap["t0"] < self.GRACE_S:
             cap["pre"] |= fresh                     # the click that started the capture
             fresh = set()
         cap["acc"] |= fresh
-        if cap["acc"] and not (set(self._held) - cap["pre"]):
+        if cap["acc"] and not (held - cap["pre"]):
             self._finish_capture("done")
 
     def _capture_timeout(self):
@@ -655,9 +669,10 @@ class InputHub:
     def capture_status(self):
         cap = self._capture
         if not cap:
-            return {"state": "idle", "tokens": [], "label": ""}
+            return {"state": "idle", "tokens": [], "label": "", "purpose": ""}
         seen = cap["acc"] if cap["state"] == "active" else cap["tokens"]
-        return {"state": cap["state"], "tokens": valid_tokens(seen), "label": describe(valid_tokens(seen))}
+        return {"state": cap["state"], "tokens": valid_tokens(seen), "label": describe(valid_tokens(seen)),
+                "purpose": cap.get("purpose", "")}
 
     # ----- exclusive hold while recording an activator -----
     @staticmethod

@@ -155,6 +155,100 @@ class Typing(unittest.TestCase):
         self.assertEqual(ut.DEVICE_NAME, ui.VIRTUAL_KEYBOARD_NAME)
 
 
+def key_events(raw: bytes):
+    """[(code, value)] of the key events in a recording."""
+    out = []
+    for off in range(0, len(raw), ut.EVENT.size):
+        _s, _u, etype, code, value = ut.EVENT.unpack_from(raw, off)
+        if etype == ut.EV_KEY:
+            out.append((code, value))
+    return out
+
+
+class KeyActions(unittest.TestCase):
+    def setUp(self):
+        self.e = Env()
+
+    def tearDown(self):
+        self.e.close()
+
+    def test_single_key(self):
+        self.e.kb.press_keys([28])
+        self.assertEqual(key_events(self.e.written()), [(28, 1), (28, 0)])
+
+    def test_combination_modifiers_down_first_then_key_released_in_reverse(self):
+        # the documented ydotool pattern: Ctrl down, Alt down, F1 down/up, Alt up, Ctrl up
+        self.e.kb.press_keys(ut.ordered_codes(["key:59", "key:56", "key:29"]))
+        self.assertEqual(key_events(self.e.written()),
+                         [(29, 1), (56, 1), (59, 1), (59, 0), (56, 0), (29, 0)])
+
+    def test_the_key_is_held_for_the_requested_time_and_modifiers_get_a_head_start(self):
+        self.e.kb.press_keys([29, 20], hold_s=0.12)
+        sleeps = [x for x in self.e.sleeps if x != ut.CREATE_SETTLE_S]
+        self.assertIn(0.12, sleeps)                                   # held long enough for per-frame polling
+        self.assertEqual(sleeps[0], ut.MOD_LEAD_S)                    # modifier registers before the next key
+
+    def test_a_failed_press_never_leaves_keys_down(self):
+        self.e.kb.open()
+        real = self.e.kb._emit
+        calls = []
+        def flaky(code, value):
+            calls.append((code, value))
+            if len(calls) == 2:
+                raise OSError("gone")
+            real(code, value)
+        self.e.kb._emit = flaky
+        with self.assertRaises(ut.KeyboardError):
+            self.e.kb.press_keys([29, 20])
+        self.assertFalse(self.e.kb.created)
+
+    def test_no_keys_does_nothing(self):
+        self.e.kb.press_keys([])
+        self.assertEqual(self.e.written(), b"")
+        self.assertFalse(self.e.kb.created)
+
+    def test_actions(self):
+        self.assertEqual(ut.action_codes({"mode": "enter"}), [28])
+        self.assertEqual(ut.action_codes({"mode": "none"}), [])
+        self.assertEqual(ut.action_codes({"mode": "custom", "keys": ["key:20", "key:42", "key:29"]}), [29, 42, 20])
+        self.assertEqual(ut.action_label({"mode": "none"}), "None")
+        self.assertEqual(ut.action_label({"mode": "enter"}), "Enter")
+        self.assertEqual(ut.action_label({"mode": "custom", "keys": ["key:20", "key:29"]}), "Left Ctrl + T")
+        self.assertEqual(ut.action_label({"mode": "custom", "keys": []}), "Not set")
+
+    def test_defaults_are_enter_before_and_after(self):
+        self.assertEqual(ut.normalize_action(None), {"mode": "enter", "keys": []})
+        self.assertEqual(ut.normalize_action("junk"), {"mode": "enter", "keys": []})
+        self.assertEqual(ut.normalize_action({"mode": "bogus"}), {"mode": "enter", "keys": []})
+
+    def test_only_keyboard_keys_are_accepted_and_the_count_is_capped(self):
+        a = ut.normalize_action({"mode": "custom", "keys": ["key:29", "pad:A", "mouse:272", "key:20", "key:x"]})
+        self.assertEqual(a["keys"], ["key:29", "key:20"])
+        many = ["key:%d" % c for c in (29, 42, 56, 125, 20)]
+        self.assertEqual(len(ut.normalize_action({"mode": "custom", "keys": many})["keys"]), 4)
+
+    def test_keys_are_dropped_unless_the_mode_is_custom(self):
+        self.assertEqual(ut.normalize_action({"mode": "enter", "keys": ["key:20"]})["keys"], [])
+
+    def test_picker_options(self):
+        codes = [o["code"] for o in ut.KEY_OPTIONS]
+        self.assertEqual(len(codes), len(set(codes)))                 # no duplicates
+        self.assertEqual(ut.KEY_OPTIONS[0], {"code": 28, "label": "Enter"})
+        labels = {o["label"] for o in ut.KEY_OPTIONS}
+        for needed in ("Tab", "Space", "Esc", "T", "F9", "Up", "Page Down", "/"):
+            self.assertIn(needed, labels)
+        self.assertEqual(ut.MOD_OPTIONS[0], {"label": "No modifier", "codes": []})
+        for o in ut.MOD_OPTIONS:
+            self.assertTrue(all(c in (29, 42, 56, 125) for c in o["codes"]))
+
+    def test_timing_table_is_sane(self):
+        for name, (delay, hold, before, after) in ut.TIMING.items():
+            self.assertGreaterEqual(hold, 0.03, name)                 # long enough for a 30 fps sampler
+            self.assertGreater(hold, delay * 3, name)                 # keys around the text are held longer than letters
+        self.assertLess(ut.TIMING["fast"][1], ut.TIMING["normal"][1])
+        self.assertLess(ut.TIMING["normal"][1], ut.TIMING["slow"][1])
+
+
 class Cleaning(unittest.TestCase):
     def test_removes_sound_annotations(self):
         self.assertEqual(ut.clean_for_typing(" [BLANK_AUDIO] "), "")

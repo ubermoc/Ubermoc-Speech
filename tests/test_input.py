@@ -590,6 +590,54 @@ class Capture(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class KeysOnlyCapture(unittest.TestCase):
+    def setUp(self):
+        self.e = _Env()
+        self.e.add("kbd", "keyboard")
+        self.e.add("deck", "deck")
+        self.e.add("mouse", "mouse")
+        self.done = []
+
+    def tearDown(self):
+        self.e.close()
+
+    def start(self):
+        self.e.hub.begin_capture(timeout=5, on_done=self.done.append, kinds=("key",), purpose="before")
+        self.e.hub._capture["t0"] -= 1
+
+    def test_only_keyboard_keys_are_recorded(self):
+        self.start()
+        self.e.send("deck", deck_report(7))                       # a controller button: ignored
+        self.e.send("mouse", ev(1, 272, 1))                       # a mouse click: ignored
+        self.e.send("kbd", ev(1, 29, 1) + ev(1, 20, 1))           # Ctrl + T
+        self.e.send("deck", deck_report())
+        self.e.send("mouse", ev(1, 272, 0))
+        self.assertEqual(self.e.hub.capture_status()["state"], "active")    # not done while keys are held
+        self.e.send("kbd", ev(1, 29, 0) + ev(1, 20, 0))
+        self.assertEqual(self.done, [["key:29", "key:20"]])
+
+    def test_a_controller_button_alone_never_finishes_it(self):
+        self.start()
+        self.e.send("deck", deck_report(7))
+        self.e.send("deck", deck_report())
+        self.assertEqual(self.e.hub.capture_status()["state"], "active")
+        self.assertEqual(self.done, [])
+
+    def test_status_reports_the_purpose(self):
+        self.start()
+        self.assertEqual(self.e.hub.capture_status()["purpose"], "before")
+        self.e.hub.cancel_capture()
+        self.e.hub.begin_capture(timeout=5)
+        self.assertEqual(self.e.hub.capture_status()["purpose"], "activator")
+
+    def test_a_key_already_held_when_it_starts_is_ignored_until_released(self):
+        self.e.send("kbd", ev(1, 28, 1))                          # Enter held (e.g. used to press the button)
+        self.start()
+        self.e.send("kbd", ev(1, 28, 0) + ev(1, 20, 1))
+        self.e.send("kbd", ev(1, 20, 0))
+        self.assertEqual(self.done, [["key:20"]])
+
+
 class Lifecycle(unittest.TestCase):
     def test_discovery_and_cleanup_with_fake_filesystem(self):
         with tempfile.TemporaryDirectory() as root:

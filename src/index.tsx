@@ -24,7 +24,11 @@ interface DlProgress { done: number; total: number }
 interface TypedInfo {
   status: "typed" | "panel" | "off" | "empty" | "error";
   method?: string; typed?: number; skipped?: number; note?: string; error?: string;
+  before?: string | null; after?: string | null;
 }
+interface KeyAction { mode: "none" | "enter" | "custom"; keys: string[]; label: string }
+interface KeyOption { code: number; label: string }
+interface ModOption { label: string; codes: number[] }
 interface LastResult {
   ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number; by?: string;
   typed?: TypedInfo;
@@ -34,6 +38,10 @@ interface TypingInfo {
   method: "keyboard" | "steam";
   speed: "fast" | "normal" | "slow";
   keyboard: { available: boolean; reason: string };
+  before: KeyAction;
+  after: KeyAction;
+  key_options: KeyOption[];
+  mod_options: ModOption[];
   test: (TypedInfo & { at: number }) | null;
 }
 interface DictState { phase: Phase; last: LastResult | null; activator_held: boolean }
@@ -77,6 +85,8 @@ const setUiPad = callable<[string[]], boolean>("set_ui_pad");
 const getTyping = callable<[], TypingInfo>("get_typing");
 const setTyping = callable<[boolean, string, string], TypingInfo>("set_typing");
 const typeTest = callable<[number], { ok: boolean }>("type_test");
+const setKeyAction = callable<[string, string, string[]], TypingInfo>("set_key_action");
+const startKeyCapture = callable<[string], { ok: boolean; error?: string }>("start_key_capture");
 const typeAck = callable<[string, boolean], boolean>("type_ack");
 const logBackend = callable<[string], boolean>("log");
 
@@ -122,7 +132,7 @@ function uiButton(id: number, down: boolean) {
 // Remembers the model being browsed, even if the panel is rebuilt.
 let lastChoice = "";
 // Which groups are expanded; kept at module level so closing and reopening the menu keeps them.
-const openGroups: Record<string, boolean> = {};
+let openGroup: string | null = null;
 
 function GroupHeader(props: { label: string; summary: string; open: boolean; onToggle: () => void }) {
   return (
@@ -145,6 +155,8 @@ const typedText = (t?: TypedInfo | null): string => {
         `Typed ${t.typed ?? 0} characters` +
         (t.method === "steam" ? " (Steam keyboard)" : "") +
         (t.skipped ? `, ${t.skipped} could not be typed` : "") +
+        (t.before ? `; ${t.before} before` : "") +
+        (t.after ? `; ${t.after} after` : "") +
         (t.note ? ` - ${t.note}` : "")
       );
     case "panel": return "Not typed: this menu was open, so the text is only shown here";
@@ -181,12 +193,14 @@ function Panel() {
   const [dict, setDict] = useState<DictState>({ phase: "idle", last: null, activator_held: false });
   const [startError, setStartError] = useState("");
   const [act, setAct] = useState<ActivatorInfo | null>(null);
-  const [capturing, setCapturing] = useState(false);
+  const [capTarget, setCapTarget] = useState<"activator" | "before" | "after" | null>(null);
+  const capturing = capTarget === "activator";
+  const [keyMsg, setKeyMsg] = useState<Record<string, string>>({});
   const [cap, setCap] = useState<CaptureStatus | null>(null);
   const [capMsg, setCapMsg] = useState("");
   const [typing, setTypingInfo] = useState<TypingInfo | null>(null);
   const [typeMsg, setTypeMsg] = useState("");
-  const [open, setOpen] = useState<Record<string, boolean>>({ ...openGroups });
+  const [open, setOpen] = useState<string | null>(openGroup);
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
@@ -237,25 +251,31 @@ function Panel() {
     };
   }, []);
 
-  // While recording an activator, follow what the backend hears.
+  // While recording an activator or a key combination, follow what the backend hears.
   useEffect(() => {
-    if (!capturing) return;
+    if (!capTarget) return;
+    const target = capTarget;
     const t = setInterval(async () => {
       const c = await captureStatus();
       setCap(c);
-      setAct(await getActivator());
+      if (target === "activator") setAct(await getActivator());
       if (c.state !== "active") {
-        setCapturing(false);
-        setCapMsg(
+        setCapTarget(null);
+        const msg =
           c.state === "done" ? `Saved: ${c.label}`
           : c.state === "timeout" ? "Nothing was pressed - try again"
-          : "Cancelled"
-        );
-        setAct(await getActivator());
+          : "Cancelled";
+        if (target === "activator") {
+          setCapMsg(msg);
+          setAct(await getActivator());
+        } else {
+          setKeyMsg((m) => ({ ...m, [target]: msg }));
+          setTypingInfo(await getTyping());
+        }
       }
     }, 300);
     return () => clearInterval(t);
-  }, [capturing]);
+  }, [capTarget]);
 
   const downloaded = models.filter((m) => m.installed);
   const chosen = models.find((m) => m.name === choice);
@@ -294,9 +314,10 @@ function Panel() {
     await refresh();
   };
 
+  // Accordion: opening a group closes the one that was open.
   const toggleGroup = (key: string) => {
-    openGroups[key] = !openGroups[key];
-    setOpen({ ...openGroups });
+    openGroup = open === key ? null : key;
+    setOpen(openGroup);
   };
 
   const phase = dict.phase;
@@ -330,8 +351,94 @@ function Panel() {
     setCapMsg("");
     setCap(null);
     const r = await startCapture();
-    if (r.ok) setCapturing(true);
+    if (r.ok) setCapTarget("activator");
     else setCapMsg(r.error ?? "Could not start listening");
+  };
+
+  const applyKeyAction = async (which: "before" | "after", mode: string, keys: string[]) => {
+    setKeyMsg((m) => ({ ...m, [which]: "" }));
+    setTypingInfo(await setKeyAction(which, mode, keys));
+  };
+
+  const beginKeyCapture = async (which: "before" | "after") => {
+    setKeyMsg((m) => ({ ...m, [which]: "" }));
+    setCap(null);
+    const r = await startKeyCapture(which);
+    if (r.ok) setCapTarget(which);
+    else setKeyMsg((m) => ({ ...m, [which]: r.error ?? "Could not start listening" }));
+  };
+
+  // The keys pressed around the typed text: None, Enter, or any key / combination.
+  const MODIFIERS = [29, 42, 56, 125];
+  const keyActionRows = (which: "before" | "after", label: string, hint: string) => {
+    const a = typing?.[which] ?? { mode: "enter", keys: [], label: "Enter" };
+    const codes = a.keys.map((t) => Number(t.slice(4)));
+    const mods = codes.filter((c) => MODIFIERS.includes(c));
+    const main = codes.find((c) => !MODIFIERS.includes(c));
+    const modIndex = Math.max(
+      0,
+      (typing?.mod_options ?? []).findIndex(
+        (o) => [...o.codes].sort().join() === [...mods].sort().join()
+      )
+    );
+    const listening = capTarget === which;
+    const setCustom = (modCodes: number[], mainCode?: number) =>
+      applyKeyAction(which, "custom", [...modCodes, ...(mainCode !== undefined ? [mainCode] : [])].map((c) => `key:${c}`));
+    return (
+      <>
+        <PanelSectionRow>
+          <DropdownItem
+            label={label}
+            description={hint}
+            rgOptions={[
+              { data: "none", label: "None" },
+              { data: "enter", label: "Enter" },
+              { data: "custom", label: "Custom key or combination" },
+            ]}
+            selectedOption={a.mode}
+            onChange={(o) => applyKeyAction(which, o.data as string, o.data === "custom" ? a.keys : [])}
+          />
+        </PanelSectionRow>
+        {a.mode === "custom" && (
+          <>
+            <PanelSectionRow>
+              <Field label="Keys">{listening ? (cap?.label || "waiting for keys...") : a.label}</Field>
+            </PanelSectionRow>
+            {listening ? (
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => cancelCapture()}
+                  description="Hold the keys together on a keyboard, then let go. Your keyboard is paused while listening.">
+                  Listening... tap to cancel
+                </ButtonItem>
+              </PanelSectionRow>
+            ) : (
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => beginKeyCapture(which)} description={keyMsg[which] || undefined}>
+                  Record from a keyboard
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            <PanelSectionRow>
+              <DropdownItem
+                label="Hold with"
+                rgOptions={(typing?.mod_options ?? []).map((o, i) => ({ data: i, label: o.label }))}
+                selectedOption={modIndex}
+                onChange={(o) => setCustom(typing?.mod_options[o.data as number]?.codes ?? [], main)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Key"
+                rgOptions={(typing?.key_options ?? []).map((k) => ({ data: k.code, label: k.label }))}
+                selectedOption={main}
+                strDefaultLabel="Choose a key..."
+                onChange={(o) => setCustom(mods, o.data as number)}
+              />
+            </PanelSectionRow>
+          </>
+        )}
+      </>
+    );
   };
 
   const applyTyping = async (patch: Partial<Pick<TypingInfo, "enabled" | "method" | "speed">>) => {
@@ -363,8 +470,8 @@ function Panel() {
 
   return (
     <>
-      <GroupHeader label="Models" summary={active || "No model yet"} open={!!open.models} onToggle={() => toggleGroup("models")} />
-      {open.models && (
+      <GroupHeader label="Models" summary={active || "No model yet"} open={open === "models"} onToggle={() => toggleGroup("models")} />
+      {open === "models" && (
         <>
       <PanelSection title="Current model">
         {downloaded.length > 0 ? (
@@ -457,8 +564,8 @@ function Panel() {
         </>
       )}
 
-      <GroupHeader label="Activator" summary={act?.label ? act.label : "Not set"} open={!!open.activator} onToggle={() => toggleGroup("activator")} />
-      {open.activator && (
+      <GroupHeader label="Activator" summary={act?.label ? act.label : "Not set"} open={open === "activator"} onToggle={() => toggleGroup("activator")} />
+      {open === "activator" && (
         <>
       <PanelSection title="Activator">
         <PanelSectionRow>
@@ -529,6 +636,11 @@ function Panel() {
         </PanelSectionRow>
       </PanelSection>
 
+      <PanelSection title="Around the typed text">
+        {keyActionRows("before", "Press before typing", "Pressed first, then the text is typed. Enter opens a chat box in most games.")}
+        {keyActionRows("after", "Press after typing", "Pressed once the text is typed. Enter sends it.")}
+      </PanelSection>
+
       <PanelSection title="Typing">
         <PanelSectionRow>
           <ToggleField
@@ -580,8 +692,8 @@ function Panel() {
         </>
       )}
 
-      <GroupHeader label="Testing" summary={phaseText} open={!!open.testing} onToggle={() => toggleGroup("testing")} />
-      {open.testing && (
+      <GroupHeader label="Testing" summary={phaseText} open={open === "testing"} onToggle={() => toggleGroup("testing")} />
+      {open === "testing" && (
         <>
       <PanelSection title="Transcribe">
         {status && !status.binary && (
@@ -620,7 +732,7 @@ function Panel() {
           <ButtonItem
             layout="below"
             onClick={runTypingTest}
-            description={typeMsg || "Types a short test sentence after 5 seconds, so you can click into any text box first"}
+            description={typeMsg || "Types a short test sentence after 5 seconds, with your before and after keys, so you can click into any text box first"}
           >
             Test typing
           </ButtonItem>
@@ -630,9 +742,6 @@ function Panel() {
         </>
       )}
 
-      <GroupHeader label="Updates" summary={`v${upd?.installed.version ?? "..."}${upd?.available ? " - update available" : ""}`} open={!!open.updates} onToggle={() => toggleGroup("updates")} />
-      {open.updates && (
-        <>
       <PanelSection title="Updates">
         <PanelSectionRow>
           <Field label="Installed version">v{upd?.installed.version ?? "..."}</Field>
@@ -677,8 +786,6 @@ function Panel() {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
-        </>
-      )}
     </>
   );
 }

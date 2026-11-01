@@ -24,7 +24,7 @@ import subprocess
 import time
 
 from ubermoc_codes import KEY_NAMES
-from ubermoc_input import VIRTUAL_KEYBOARD_NAME as DEVICE_NAME
+from ubermoc_input import MODIFIER_CODES, VIRTUAL_KEYBOARD_NAME as DEVICE_NAME, describe, label_for, valid_tokens
 
 # ioctl numbers, derived from linux/uinput.h ('U' base 0x55)
 UI_DEV_CREATE = 0x5501                 # _IO('U', 1)
@@ -38,6 +38,7 @@ assert SETUP.size == 92
 EV_SYN, EV_KEY = 0x00, 0x01
 BUS_USB = 0x03
 KEY_LEFTSHIFT = 42
+KEY_ENTER = 28
 EVENT = struct.Struct("llHHi")         # struct input_event on 64-bit Linux
 CREATE_SETTLE_S = 0.35                 # let the desktop notice the new keyboard before the first key
 
@@ -86,6 +87,79 @@ def clean_for_typing(text: str) -> str:
     for src, dst in _REPLACEMENTS.items():
         text = text.replace(src, dst)
     return re.sub(r" {2,}", " ", text).strip()
+
+
+# Timing by the "typing speed" setting: (seconds between typed characters, seconds a
+# before/after key is held, wait after the "before" key, wait before the "after" key).
+# A key held for only a few milliseconds is missed by programs and games that sample
+# the keyboard once per frame (xdotool's default is about 6-12 ms, and reports of such
+# misses recommend 50-150 ms), so keys pressed around the text are held much longer
+# than typed letters. The wait after the "before" key gives a chat box time to open.
+TIMING = {
+    "fast": (0.003, 0.030, 0.12, 0.04),
+    "normal": (0.008, 0.060, 0.25, 0.08),
+    "slow": (0.025, 0.120, 0.50, 0.15),
+}
+MOD_LEAD_S = 0.015          # let a modifier register before the next key goes down
+RELEASE_GAP_S = 0.01
+
+# ---- keys pressed before / after the typed text -----------------------------
+# An action is {"mode": "none" | "enter" | "custom", "keys": ["key:<code>", ...]}.
+DEFAULT_ACTION = {"mode": "enter", "keys": []}
+MAX_ACTION_KEYS = 4
+
+
+def normalize_action(raw) -> dict:
+    """A valid action from whatever was stored (settings files can be stale)."""
+    if not isinstance(raw, dict) or raw.get("mode") not in ("none", "enter", "custom"):
+        return dict(DEFAULT_ACTION)
+    keys = [t for t in valid_tokens(raw.get("keys")) if t.startswith("key:")][:MAX_ACTION_KEYS]
+    return {"mode": raw["mode"], "keys": keys if raw["mode"] == "custom" else []}
+
+
+def ordered_codes(tokens) -> list:
+    """Key codes in press order: modifiers first, then the rest by code."""
+    codes = sorted({int(t[4:]) for t in tokens if t.startswith("key:")})
+    return [c for c in codes if c in MODIFIER_CODES] + [c for c in codes if c not in MODIFIER_CODES]
+
+
+def action_codes(action) -> list:
+    action = normalize_action(action)
+    if action["mode"] == "enter":
+        return [KEY_ENTER]
+    if action["mode"] == "custom":
+        return ordered_codes(action["keys"])
+    return []
+
+
+def action_label(action) -> str:
+    action = normalize_action(action)
+    if action["mode"] == "none":
+        return "None"
+    if action["mode"] == "enter":
+        return "Enter"
+    return describe(action["keys"]) if action["keys"] else "Not set"
+
+
+# Keys offered in the picker (controller friendly), in display order.
+_PICK_NAMES = (["ENTER", "TAB", "SPACE", "ESC", "BACKSPACE", "DELETE"]
+               + list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + list("1234567890")
+               + [f"F{i}" for i in range(1, 13)]
+               + ["UP", "DOWN", "LEFT", "RIGHT", "HOME", "END", "PAGEUP", "PAGEDOWN", "INSERT"]
+               + ["MINUS", "EQUAL", "LEFTBRACE", "RIGHTBRACE", "SEMICOLON", "APOSTROPHE", "GRAVE",
+                  "BACKSLASH", "COMMA", "DOT", "SLASH"])
+KEY_OPTIONS = [{"code": _BY_NAME[n], "label": label_for(f"key:{_BY_NAME[n]}")} for n in _PICK_NAMES]
+MOD_OPTIONS = [
+    {"label": "No modifier", "codes": []},
+    {"label": "Ctrl", "codes": [29]},
+    {"label": "Shift", "codes": [42]},
+    {"label": "Alt", "codes": [56]},
+    {"label": "Super (Windows key)", "codes": [125]},
+    {"label": "Ctrl + Shift", "codes": [29, 42]},
+    {"label": "Ctrl + Alt", "codes": [29, 56]},
+    {"label": "Alt + Shift", "codes": [42, 56]},
+    {"label": "Ctrl + Alt + Shift", "codes": [29, 42, 56]},
+]
 
 
 class KeyboardError(Exception):
@@ -158,6 +232,32 @@ class VirtualKeyboard:
     # ----- typing -----
     def _emit(self, code: int, value: int):
         os.write(self._fd, EVENT.pack(0, 0, EV_KEY, code, value) + EVENT.pack(0, 0, EV_SYN, 0, 0))
+
+    def press_keys(self, codes, hold_s: float = 0.06):
+        """Press a key or combination: modifiers go down first, the keys are held for
+        `hold_s`, then everything is released in reverse order (the sequence ydotool
+        documents, e.g. 29:1 56:1 59:1 59:0 56:0 29:0 for Ctrl+Alt+F1)."""
+        if not codes:
+            return
+        self.open()
+        down = []
+        try:
+            for code in codes:
+                self._emit(code, 1)
+                down.append(code)
+                self._sleep(MOD_LEAD_S)
+            self._sleep(hold_s)
+        except OSError as e:
+            self.close()
+            raise KeyboardError(f"key press failed: {e}")
+        finally:
+            if self._fd is not None:
+                for code in reversed(down):
+                    try:
+                        self._emit(code, 0)
+                    except OSError:
+                        break
+                    self._sleep(RELEASE_GAP_S)
 
     def type_text(self, text: str, delay_s: float = 0.008) -> dict:
         """Press the keys for `text`. Shift is held across consecutive capitals/symbols.

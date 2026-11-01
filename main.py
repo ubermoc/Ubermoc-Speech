@@ -50,8 +50,6 @@ MODELS = {
     "large-v3-turbo": (1624, "All languages. Best accuracy, heaviest."),
 }
 
-# Seconds between key presses when typing, by the "typing speed" setting.
-TYPE_DELAYS = {"fast": 0.003, "normal": 0.008, "slow": 0.025}
 TYPE_TEST_TEXT = "Ubermoc Speech test"
 
 # Whisper normally encodes a full 30 s window even for a 3 s clip. Telling it the
@@ -417,7 +415,8 @@ class Plugin:
 
     # ---------- typing the text ----------
     async def _deliver_text(self, text: str, force: bool = False) -> dict:
-        """Type `text` into whatever has focus. Returns what happened, for the panel."""
+        """Press the "before" key, type `text`, press the "after" key, into whatever
+        has focus. Returns what happened, for the panel."""
         s = self._load_settings()
         if not force:
             if not s.get("type_enabled", True):
@@ -433,18 +432,57 @@ class Plugin:
         deadline = time.time() + 2.0
         while self.hub and tokens and self.hub.any_held(tokens) and time.time() < deadline:
             await asyncio.sleep(0.02)
-        delay = TYPE_DELAYS.get(s.get("type_speed", "normal"), TYPE_DELAYS["normal"])
-        note = ""
+        speed = s.get("type_speed") if s.get("type_speed") in ubermoc_typing.TIMING else "normal"
+        delay, hold, settle_before, settle_after = ubermoc_typing.TIMING[speed]
+        before = ubermoc_typing.normalize_action(s.get("before"))
+        after = ubermoc_typing.normalize_action(s.get("after"))
+        notes = []
+        pressed_before = pressed_after = None
+
+        if ubermoc_typing.action_codes(before):
+            err = await Plugin._press(self, ubermoc_typing.action_codes(before), hold)
+            if err:
+                notes.append(f"The key before the text was not pressed: {err}")
+            else:
+                pressed_before = ubermoc_typing.action_label(before)
+                await asyncio.sleep(settle_before)      # give a chat box time to open
+
+        result = None
         if s.get("type_method") == "steam":
             if await Plugin._type_via_steam(self, cleaned):
-                return {"status": "typed", "method": "steam", "typed": len(cleaned), "skipped": 0}
-            note = "The Steam keyboard did not answer, so the virtual keyboard was used."
+                result = {"status": "typed", "method": "steam", "typed": len(cleaned), "skipped": 0}
+            else:
+                notes.append("The Steam keyboard did not answer, so the virtual keyboard was used.")
+        if result is None:
+            try:
+                r = await asyncio.get_event_loop().run_in_executor(None, self._type_blocking, cleaned, delay)
+                result = {"status": "typed", "method": "keyboard", **r}
+            except ubermoc_typing.KeyboardError as e:
+                decky.logger.error(f"typing failed: {e}")
+                return {"status": "error", "error": str(e), "before": pressed_before}
+
+        if ubermoc_typing.action_codes(after):
+            await asyncio.sleep(settle_after)
+            err = await Plugin._press(self, ubermoc_typing.action_codes(after), hold)
+            if err:
+                notes.append(f"The key after the text was not pressed: {err}")
+            else:
+                pressed_after = ubermoc_typing.action_label(after)
+        return {**result, "before": pressed_before, "after": pressed_after, "note": " ".join(notes)}
+
+    async def _press(self, codes: list, hold: float) -> str:
+        """Press a key/combination on the virtual keyboard. Returns "" or an error text."""
+        def work():
+            if self.keyboard is None:
+                self.keyboard = ubermoc_typing.VirtualKeyboard()
+            self.keyboard.press_keys(codes, hold)
+
         try:
-            r = await asyncio.get_event_loop().run_in_executor(None, self._type_blocking, cleaned, delay)
+            await asyncio.get_event_loop().run_in_executor(None, work)
+            return ""
         except ubermoc_typing.KeyboardError as e:
-            decky.logger.error(f"typing failed: {e}")
-            return {"status": "error", "error": str(e)}
-        return {"status": "typed", "method": "keyboard", "note": note, **r}
+            decky.logger.error(f"key press failed: {e}")
+            return str(e)
 
     def _type_blocking(self, text: str, delay: float) -> dict:
         if self.keyboard is None:
@@ -470,14 +508,22 @@ class Plugin:
             fut.set_result(bool(ok))
         return True
 
+    def _action(self, which: str) -> dict:
+        action = ubermoc_typing.normalize_action(self._load_settings().get(which))
+        return {**action, "label": ubermoc_typing.action_label(action)}
+
     async def get_typing(self) -> dict:
         s = self._load_settings()
         available, reason = ubermoc_typing.VirtualKeyboard().check()
         return {
             "enabled": bool(s.get("type_enabled", True)),
             "method": s.get("type_method") if s.get("type_method") in ("keyboard", "steam") else "keyboard",
-            "speed": s.get("type_speed") if s.get("type_speed") in TYPE_DELAYS else "normal",
+            "speed": s.get("type_speed") if s.get("type_speed") in ubermoc_typing.TIMING else "normal",
             "keyboard": {"available": available, "reason": reason},
+            "before": self._action("before"),
+            "after": self._action("after"),
+            "key_options": ubermoc_typing.KEY_OPTIONS,
+            "mod_options": ubermoc_typing.MOD_OPTIONS,
             "test": self.last_typing_test,
         }
 
@@ -485,9 +531,28 @@ class Plugin:
         self._save_settings(
             type_enabled=bool(enabled),
             type_method=method if method in ("keyboard", "steam") else "keyboard",
-            type_speed=speed if speed in TYPE_DELAYS else "normal",
+            type_speed=speed if speed in ubermoc_typing.TIMING else "normal",
         )
         return await Plugin.get_typing(self)
+
+    async def set_key_action(self, which: str, mode: str, keys: list) -> dict:
+        """Choose what is pressed before/after the typed text: none, Enter, or keys."""
+        if which in ("before", "after"):
+            self._save_settings(**{which: ubermoc_typing.normalize_action({"mode": mode, "keys": keys})})
+        return await Plugin.get_typing(self)
+
+    async def start_key_capture(self, which: str) -> dict:
+        """Listen for the keyboard keys the user holds together, then lets go of."""
+        if which not in ("before", "after") or not self.hub:
+            return {"ok": False, "error": "input is not available"}
+        self.hub.begin_capture(
+            timeout=15.0, kinds=("key",), purpose=which,
+            on_done=lambda toks, w=which: Plugin._key_captured(self, w, toks))
+        return {"ok": True}
+
+    def _key_captured(self, which: str, tokens: list):
+        if tokens:
+            self._save_settings(**{which: ubermoc_typing.normalize_action({"mode": "custom", "keys": tokens})})
 
     async def type_test(self, delay_s: float = 5.0) -> dict:
         """Type a short sentence after a delay (so the user can click a text box first)."""
@@ -568,7 +633,8 @@ class Plugin:
 
     async def capture_status(self) -> dict:
         st = self.hub.capture_status() if self.hub else {"state": "idle", "tokens": [], "label": ""}
-        st["warnings"] = ubermoc_input.warnings_for(st["tokens"]) if st["state"] == "done" else []
+        st["warnings"] = (ubermoc_input.warnings_for(st["tokens"])
+                          if st["state"] == "done" and st.get("purpose") == "activator" else [])
         return st
 
     async def cancel_capture(self) -> bool:
