@@ -103,7 +103,8 @@ function Panel() {
     await refresh();
   };
 
-  // Downloaded model: switch now. Not downloaded: start downloading it.
+  // Downloaded model: switch now. Not downloaded: just select it; the
+  // Download button below starts the download.
   const pickModel = async (name: string) => {
     setChoice(name);
     setDlError("");
@@ -113,8 +114,6 @@ function Panel() {
       const r = await setModel(name);
       if (r.ok) setActive(name);
       else setDlError(r.error ?? "Could not switch model");
-    } else {
-      void startDownload(m);
     }
   };
 
@@ -189,7 +188,7 @@ function Panel() {
         <PanelSectionRow>
           <DropdownItem
             label="Model"
-            description="Downloaded models switch right away. Others start downloading when you pick them."
+            description="Downloaded models switch right away. For others, pick it, then press Download."
             rgOptions={models.map((m) => ({
               data: m.name,
               label: m.installed ? `${m.name}  -  downloaded` : `${m.name}  -  ${sizeLabel(m.size_mb)}`,
@@ -201,6 +200,14 @@ function Panel() {
         {chosen && (
           <PanelSectionRow>
             <Field label={chosen.name}>{chosen.description}</Field>
+          </PanelSectionRow>
+        )}
+        {chosen && !chosen.installed && !progress[chosen.name] && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => startDownload(chosen)}
+              description="One-time download, kept permanently">
+              {dlError ? "Retry download of" : "Download"} {chosen.name} ({sizeLabel(chosen.size_mb)})
+            </ButtonItem>
           </PanelSectionRow>
         )}
         {downloading.map(([name, p]) => (
@@ -220,18 +227,9 @@ function Panel() {
           </div>
         ))}
         {dlError && (
-          <>
-            <PanelSectionRow>
-              <Field label="Problem">{dlError}</Field>
-            </PanelSectionRow>
-            {chosen && !chosen.installed && !progress[chosen.name] && (
-              <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => startDownload(chosen)}>
-                  Retry download of {chosen.name}
-                </ButtonItem>
-              </PanelSectionRow>
-            )}
-          </>
+          <PanelSectionRow>
+            <Field label="Problem">{dlError}</Field>
+          </PanelSectionRow>
         )}
       </PanelSection>
 
