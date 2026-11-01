@@ -4,8 +4,11 @@ A [Decky Loader](https://decky.xyz) plugin that records from the microphone and
 transcribes it to text with a local [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 server.
 
-Panel sections: Current model, Choose a model (download / delete), Activator,
-Transcribe, Updates (installs the latest GitHub release).
+The panel opens as four collapsible groups; tap one to expand it:
+- **Models**: Current model, Choose a model (download / delete)
+- **Activator**: the hold-to-talk activator and the Typing settings
+- **Testing**: record a test, see the text, test typing
+- **Updates**: installs the latest GitHub release
 
 ## Activator (hold to talk)
 Hold the activator to record, release to transcribe. It can be keyboard keys,

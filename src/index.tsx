@@ -121,6 +121,21 @@ function uiButton(id: number, down: boolean) {
 
 // Remembers the model being browsed, even if the panel is rebuilt.
 let lastChoice = "";
+// Which groups are expanded; kept at module level so closing and reopening the menu keeps them.
+const openGroups: Record<string, boolean> = {};
+
+function GroupHeader(props: { label: string; summary: string; open: boolean; onToggle: () => void }) {
+  return (
+    <PanelSection>
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={props.onToggle} description={props.open ? undefined : props.summary}>
+          {props.open ? "v " : "> "}
+          {props.label}
+        </ButtonItem>
+      </PanelSectionRow>
+    </PanelSection>
+  );
+}
 
 const typedText = (t?: TypedInfo | null): string => {
   if (!t) return "";
@@ -171,6 +186,7 @@ function Panel() {
   const [capMsg, setCapMsg] = useState("");
   const [typing, setTypingInfo] = useState<TypingInfo | null>(null);
   const [typeMsg, setTypeMsg] = useState("");
+  const [open, setOpen] = useState<Record<string, boolean>>({ ...openGroups });
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
@@ -278,7 +294,18 @@ function Panel() {
     await refresh();
   };
 
+  const toggleGroup = (key: string) => {
+    openGroups[key] = !openGroups[key];
+    setOpen({ ...openGroups });
+  };
+
   const phase = dict.phase;
+  const phaseText =
+    phase === "idle" ? "Idle"
+    : phase === "starting" ? "Starting microphone..."
+    : phase === "recording" ? "Listening..."
+    : phase === "transcribing" ? "Transcribing..."
+    : "Typing...";
   const last = dict.last;
   const resultText = last ? (last.ok ? last.text || "(nothing heard)" : last.error ?? "Transcription failed") : "";
   const timing =
@@ -336,6 +363,9 @@ function Panel() {
 
   return (
     <>
+      <GroupHeader label="Models" summary={active || "No model yet"} open={!!open.models} onToggle={() => toggleGroup("models")} />
+      {open.models && (
+        <>
       <PanelSection title="Current model">
         {downloaded.length > 0 ? (
           <PanelSectionRow>
@@ -424,6 +454,12 @@ function Panel() {
         )}
       </PanelSection>
 
+        </>
+      )}
+
+      <GroupHeader label="Activator" summary={act?.label ? act.label : "Not set"} open={!!open.activator} onToggle={() => toggleGroup("activator")} />
+      {open.activator && (
+        <>
       <PanelSection title="Activator">
         <PanelSectionRow>
           <Field
@@ -539,17 +575,14 @@ function Panel() {
             {typing ? (typing.keyboard.available ? "Ready" : `Unavailable: ${typing.keyboard.reason}`) : "..."}
           </Field>
         </PanelSectionRow>
-        <PanelSectionRow>
-          <ButtonItem
-            layout="below"
-            onClick={runTypingTest}
-            description={typeMsg || "Types a short test sentence after 5 seconds, so you can click into any text box first"}
-          >
-            Test typing
-          </ButtonItem>
-        </PanelSectionRow>
       </PanelSection>
 
+        </>
+      )}
+
+      <GroupHeader label="Testing" summary={phaseText} open={!!open.testing} onToggle={() => toggleGroup("testing")} />
+      {open.testing && (
+        <>
       <PanelSection title="Transcribe">
         {status && !status.binary && (
           <PanelSectionRow>
@@ -583,8 +616,23 @@ function Panel() {
             <div style={{ whiteSpace: "pre-wrap", textAlign: "right" }}>{resultText || "-"}</div>
           </Field>
         </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem
+            layout="below"
+            onClick={runTypingTest}
+            description={typeMsg || "Types a short test sentence after 5 seconds, so you can click into any text box first"}
+          >
+            Test typing
+          </ButtonItem>
+        </PanelSectionRow>
       </PanelSection>
 
+        </>
+      )}
+
+      <GroupHeader label="Updates" summary={`v${upd?.installed.version ?? "..."}${upd?.available ? " - update available" : ""}`} open={!!open.updates} onToggle={() => toggleGroup("updates")} />
+      {open.updates && (
+        <>
       <PanelSection title="Updates">
         <PanelSectionRow>
           <Field label="Installed version">v{upd?.installed.version ?? "..."}</Field>
@@ -629,6 +677,8 @@ function Panel() {
           </ButtonItem>
         </PanelSectionRow>
       </PanelSection>
+        </>
+      )}
     </>
   );
 }
