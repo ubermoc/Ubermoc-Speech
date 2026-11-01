@@ -34,6 +34,12 @@ Valve's emulated keyboard/mouse) are held exclusively (EVIOCGRAB) so the system
 does not react to the keys pressed; the hold lasts at most ~15 s. Controllers that
 are read through raw HID cannot be held, so Steam still moves its menu with them.
 
+Settings (model, activator) are written to two places, atomically and forced to
+disk: Decky's settings folder (`~/homebrew/settings/Ubermoc Speech/`) and
+`~/.local/share/ubermoc-speech/`. On load the newest copy of each setting wins and
+a damaged file is kept as `settings.json.corrupt`. The plugin log records each save
+and what was loaded (counts only, never which keys).
+
 Privacy: devices are opened only while an activator is set or being recorded;
 no key or button is logged, and only the activator you choose is stored.
 

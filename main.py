@@ -23,6 +23,7 @@ import decky  # provided by Decky Loader
 # Decky already puts <plugin>/py_modules on sys.path; do it explicitly as well.
 sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 import ubermoc_input  # noqa: E402
+import ubermoc_settings  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 8178
@@ -88,10 +89,13 @@ class Plugin:
         os.makedirs(self._models_dir(), exist_ok=True)
         self.hub = ubermoc_input.InputHub(
             asyncio.get_event_loop(), lambda active: Plugin._on_activator(self, active))
-        tokens = ubermoc_input.valid_tokens(self._load_settings().get("activator"))
+        settings = self._load_settings()
+        tokens = ubermoc_input.valid_tokens(settings.get("activator"))
         if tokens:
             self.hub.set_activator(tokens)
-        decky.logger.info("Ubermoc Speech loaded")
+        decky.logger.info(
+            f"Ubermoc Speech loaded: model={'set' if settings.get('model') else 'default'}, "
+            f"activator={len(tokens)} input(s), settings from {self._store().paths}")
 
     async def _unload(self):
         if self.hub:
@@ -121,25 +125,23 @@ class Plugin:
             return False
         return os.path.getsize(path) > MODELS[name][0] * 1024 * 1024 * 0.6
 
-    def _settings_path(self) -> str:
-        return os.path.join(self._data_dir(), "settings.json")
+    def _store(self):
+        if getattr(self, "_settings_store", None) is None:
+            paths = [os.path.join(self._data_dir(), "settings.json")]
+            settings_dir = getattr(decky, "DECKY_PLUGIN_SETTINGS_DIR", "")
+            if settings_dir:        # Decky's recommended place for settings
+                paths.insert(0, os.path.join(settings_dir, "settings.json"))
+            self._settings_store = ubermoc_settings.SettingsStore(
+                paths, log=lambda m: decky.logger.warning(m))
+        return self._settings_store
 
     def _load_settings(self) -> dict:
-        try:
-            with open(self._settings_path()) as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        return self._store().load()
 
     def _save_settings(self, **patch):
-        """Merge into settings.json (so saving one setting never drops another)."""
-        data = self._load_settings()
-        data.update(patch)
-        tmp = self._settings_path() + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(data, f)
-        os.replace(tmp, self._settings_path())
+        """Merge into the stored settings (saving one never drops another)."""
+        if self._store().save(**patch):
+            decky.logger.info(f"settings saved ({', '.join(sorted(patch))})")
 
     def _selected(self) -> str:
         """The model in use. Always a downloaded one, or "" if none is."""
