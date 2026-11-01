@@ -372,6 +372,53 @@ class KeyActions(unittest.TestCase):
         self.assertLess(ut.TIMING["normal"][1], ut.TIMING["slow"][1])
 
 
+class Overrides(unittest.TestCase):
+    def test_a_valid_override_is_kept(self):
+        raw = {"570": {"name": "Dota 2", "kind": "steam",
+                       "before": {"mode": "none"}, "after": {"mode": "custom", "keys": ["pad:A", "key:29"]}}}
+        out = ut.normalize_overrides(raw)
+        self.assertEqual(out["570"]["name"], "Dota 2")
+        self.assertEqual(out["570"]["before"], {"mode": "none", "keys": []})
+        self.assertEqual(sorted(out["570"]["after"]["keys"]), ["key:29", "pad:A"])
+
+    def test_junk_is_dropped(self):
+        raw = {"abc": {"name": "x"}, "570": "nope", "1": {"name": "  "}, "2": {"name": "Ok"}, 3: {"name": "int key"}}
+        self.assertEqual(list(ut.normalize_overrides(raw)), ["2"])
+        self.assertEqual(ut.normalize_overrides(None), {})
+        self.assertEqual(ut.normalize_overrides([1, 2]), {})
+
+    def test_missing_actions_default_to_enter(self):
+        out = ut.normalize_overrides({"5": {"name": "Game"}})
+        self.assertEqual(out["5"]["before"], {"mode": "enter", "keys": []})
+        self.assertEqual(out["5"]["after"], {"mode": "enter", "keys": []})
+        self.assertEqual(out["5"]["kind"], "steam")
+
+    def test_shortcut_kind(self):
+        self.assertEqual(ut.normalize_overrides({"5": {"name": "App", "kind": "shortcut"}})["5"]["kind"], "shortcut")
+        self.assertEqual(ut.normalize_overrides({"5": {"name": "App", "kind": "weird"}})["5"]["kind"], "steam")
+
+    def test_the_count_is_capped(self):
+        raw = {str(i): {"name": f"g{i}"} for i in range(ut.MAX_OVERRIDES + 20)}
+        self.assertEqual(len(ut.normalize_overrides(raw)), ut.MAX_OVERRIDES)
+
+    def test_running_application_with_an_override_uses_it(self):
+        s = {"before": {"mode": "enter"}, "after": {"mode": "enter"},
+             "overrides": {"570": {"name": "Dota 2", "before": {"mode": "none"}, "after": {"mode": "custom", "keys": ["key:28"]}}}}
+        before, after, name = ut.actions_for(s, "570")
+        self.assertEqual((before["mode"], after["mode"], name), ("none", "custom", "Dota 2"))
+
+    def test_everything_else_uses_the_global_options(self):
+        s = {"before": {"mode": "none"}, "after": {"mode": "enter"},
+             "overrides": {"570": {"name": "Dota 2", "before": {"mode": "enter"}}}}
+        for appid in ("999", "", None):
+            before, after, name = ut.actions_for(s, appid)
+            self.assertEqual((before["mode"], after["mode"], name), ("none", "enter", None))
+
+    def test_with_nothing_stored_the_defaults_are_enter_and_enter(self):
+        before, after, name = ut.actions_for({}, "570")
+        self.assertEqual((before["mode"], after["mode"], name), ("enter", "enter", None))
+
+
 class Cleaning(unittest.TestCase):
     def test_removes_sound_annotations(self):
         self.assertEqual(ut.clean_for_typing(" [BLANK_AUDIO] "), "")

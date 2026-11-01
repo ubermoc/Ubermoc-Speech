@@ -51,6 +51,7 @@ MODELS = {
 }
 
 TYPE_TEST_TEXT = "Ubermoc Speech test"
+RUNNING_APP_TTL_S = 12.0   # the frontend reports every few seconds; older than this = unknown
 
 # Whisper normally encodes a full 30 s window even for a 3 s clip. Telling it the
 # real length makes short recordings much faster. Set False to turn this off.
@@ -90,6 +91,7 @@ class Plugin:
     panel_seen: float = 0.0        # last time the panel polled (it is open if recent)
     type_acks: dict = {}
     last_typing_test: dict | None = None
+    running_app: dict | None = None  # {"appid", "name", "t"} reported by the panel's frontend
 
     # ---------- lifecycle ----------
     async def _main(self):
@@ -438,8 +440,7 @@ class Plugin:
             await asyncio.sleep(0.02)
         speed = s.get("type_speed") if s.get("type_speed") in ubermoc_typing.TIMING else "normal"
         delay, hold, settle_before, settle_after = ubermoc_typing.TIMING[speed]
-        before = ubermoc_typing.normalize_action(s.get("before"))
-        after = ubermoc_typing.normalize_action(s.get("after"))
+        before, after, app_name = ubermoc_typing.actions_for(s, self._running_appid())
         notes = []
         pressed_before = pressed_after = None
 
@@ -472,7 +473,8 @@ class Plugin:
                 notes.append(f"The input after the text was not pressed: {err}")
             else:
                 pressed_after = ubermoc_typing.action_label(after)
-        return {**result, "before": pressed_before, "after": pressed_after, "note": " ".join(notes)}
+        return {**result, "before": pressed_before, "after": pressed_after, "app": app_name,
+                "note": " ".join(notes)}
 
     def _get_presser(self):
         if self.keyboard is None:
@@ -496,22 +498,28 @@ class Plugin:
             decky.logger.error(f"input press failed: {e}")
             return str(e)
 
+    def _all_action_tokens(self) -> list:
+        """Inputs of the global before/after and of every override."""
+        s = self._load_settings()
+        tokens = []
+        actions = [s.get("before", ubermoc_typing.DEFAULT_ACTION), s.get("after", ubermoc_typing.DEFAULT_ACTION)]
+        for ov in ubermoc_typing.normalize_overrides(s.get("overrides")).values():
+            actions += [ov["before"], ov["after"]]
+        for action in actions:
+            tokens += ubermoc_typing.action_tokens(action)
+        return tokens
+
     async def _prepare_outputs_if_custom(self):
         """At startup, only bother when a before/after input needs a mouse or gamepad."""
-        s = self._load_settings()
-        for which in ("before", "after"):
-            if any(not t.startswith("key:") for t in ubermoc_typing.action_tokens(s.get(which))):
-                await Plugin._prepare_outputs(self)
-                return
+        if any(not t.startswith("key:") for t in self._all_action_tokens()):
+            await Plugin._prepare_outputs(self)
 
     async def _prepare_outputs(self):
         """Create the virtual devices the chosen before/after inputs need, ahead of
         time, so the first press is not lost while the desktop notices a new device."""
-        s = self._load_settings()
-        tokens = (ubermoc_typing.action_tokens(s.get("before", ubermoc_typing.DEFAULT_ACTION))
-                  + ubermoc_typing.action_tokens(s.get("after", ubermoc_typing.DEFAULT_ACTION)))
         try:
-            await asyncio.get_event_loop().run_in_executor(None, self._get_presser().prepare, tokens)
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._get_presser().prepare, self._all_action_tokens())
         except ubermoc_typing.KeyboardError as e:
             decky.logger.warning(f"could not prepare virtual devices: {e}")
 
@@ -565,27 +573,100 @@ class Plugin:
         )
         return await Plugin.get_typing(self)
 
-    async def set_key_action(self, which: str, mode: str, keys: list) -> dict:
+    # ---------- what is running, and per-application overrides ----------
+    async def set_running_app(self, appid: str, name: str) -> bool:
+        """The panel's frontend reports the running Steam game / non-Steam app."""
+        appid = str(appid or "")
+        self.running_app = {"appid": appid if appid.isdigit() and appid != "0" else "",
+                            "name": str(name or ""), "t": time.time()}
+        return True
+
+    def _running_appid(self) -> str:
+        r = self.running_app
+        if r and time.time() - r["t"] < RUNNING_APP_TTL_S:
+            return r["appid"]
+        return ""
+
+    def _action_info(self, action: dict) -> dict:
+        return {**action, "label": ubermoc_typing.action_label(action),
+                "warnings": ubermoc_typing.action_warnings(action)}
+
+    async def get_overrides(self) -> dict:
+        overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
+        running = self._running_appid()
+        return {
+            "overrides": [
+                {"appid": appid, "name": ov["name"], "kind": ov["kind"],
+                 "before": self._action_info(ov["before"]), "after": self._action_info(ov["after"])}
+                for appid, ov in sorted(overrides.items(), key=lambda kv: kv[1]["name"].lower())
+            ],
+            "running": {"appid": running, "name": (self.running_app or {}).get("name", "") if running else "",
+                        "has_override": running in overrides},
+        }
+
+    async def add_override(self, appid: str, name: str, kind: str) -> dict:
+        """Give a game / app its own before/after. It starts as a copy of the global
+        options, so nothing changes until you change it."""
+        appid = str(appid)
+        s = self._load_settings()
+        overrides = ubermoc_typing.normalize_overrides(s.get("overrides"))
+        if appid.isdigit() and name and appid not in overrides and len(overrides) < ubermoc_typing.MAX_OVERRIDES:
+            overrides[appid] = {
+                "name": name, "kind": "shortcut" if kind == "shortcut" else "steam",
+                "before": ubermoc_typing.normalize_action(s.get("before")),
+                "after": ubermoc_typing.normalize_action(s.get("after")),
+            }
+            self._save_settings(overrides=ubermoc_typing.normalize_overrides(overrides))
+        return await Plugin.get_overrides(self)
+
+    async def remove_override(self, appid: str) -> dict:
+        overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
+        if overrides.pop(str(appid), None) is not None:
+            self._save_settings(overrides=overrides)
+        return await Plugin.get_overrides(self)
+
+    def _save_override_action(self, appid: str, which: str, action: dict) -> bool:
+        overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
+        if appid not in overrides or which not in ("before", "after"):
+            return False
+        overrides[appid][which] = ubermoc_typing.normalize_action(action)
+        self._save_settings(overrides=overrides)
+        asyncio.ensure_future(Plugin._prepare_outputs(self))
+        return True
+
+    # ---------- keys / inputs pressed before and after the text ----------
+    async def set_key_action(self, which: str, mode: str, keys: list, appid: str = "") -> dict:
         """Choose what is pressed before/after the typed text: None, Enter, or any
-        recorded key / mouse button / controller button (or a combination)."""
+        recorded key / mouse button / controller button (or a combination). With an
+        appid it is that application's override; otherwise the global option."""
+        action = {"mode": mode, "keys": keys}
+        if appid:
+            self._save_override_action(str(appid), which, action)
+            return await Plugin.get_overrides(self)
         if which in ("before", "after"):
-            self._save_settings(**{which: ubermoc_typing.normalize_action({"mode": mode, "keys": keys})})
+            self._save_settings(**{which: ubermoc_typing.normalize_action(action)})
             asyncio.ensure_future(Plugin._prepare_outputs(self))
         return await Plugin.get_typing(self)
 
-    async def start_key_capture(self, which: str) -> dict:
+    async def start_key_capture(self, which: str, appid: str = "") -> dict:
         """Listen for what the user holds together and then lets go of: a keyboard,
         a mouse or a controller, exactly like recording the activator."""
         if which not in ("before", "after") or not self.hub:
             return {"ok": False, "error": "input is not available"}
+        appid = str(appid or "")
         self.hub.begin_capture(
-            timeout=15.0, purpose=which,
-            on_done=lambda toks, w=which: Plugin._key_captured(self, w, toks))
+            timeout=15.0, purpose=f"{which}@{appid}",
+            on_done=lambda toks, w=which, a=appid: Plugin._key_captured(self, w, a, toks))
         return {"ok": True}
 
-    def _key_captured(self, which: str, tokens: list):
-        if tokens:
-            self._save_settings(**{which: ubermoc_typing.normalize_action({"mode": "custom", "keys": tokens})})
+    def _key_captured(self, which: str, appid: str, tokens: list):
+        if not tokens:
+            return
+        action = {"mode": "custom", "keys": tokens}
+        if appid:
+            self._save_override_action(appid, which, action)
+        else:
+            self._save_settings(**{which: ubermoc_typing.normalize_action(action)})
             asyncio.ensure_future(Plugin._prepare_outputs(self))
 
     async def type_test(self, delay_s: float = 5.0) -> dict:

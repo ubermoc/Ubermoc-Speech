@@ -172,6 +172,46 @@ def normalize_action(raw) -> dict:
     return {"mode": raw["mode"], "keys": keys}
 
 
+# ---------------------------------------------------------------------------
+# per-application overrides of the before/after inputs
+# ---------------------------------------------------------------------------
+# {appid: {"name": str, "kind": "steam" | "shortcut", "before": action, "after": action}}
+MAX_OVERRIDES = 100
+
+
+def normalize_overrides(raw) -> dict:
+    """Valid overrides from whatever was stored (settings files can be stale)."""
+    out = {}
+    if not isinstance(raw, dict):
+        return out
+    for appid, entry in raw.items():
+        if not (isinstance(appid, str) and appid.isdigit() and isinstance(entry, dict)):
+            continue
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        out[appid] = {
+            "name": name.strip()[:120],
+            "kind": "shortcut" if entry.get("kind") == "shortcut" else "steam",
+            "before": normalize_action(entry.get("before")),
+            "after": normalize_action(entry.get("after")),
+        }
+        if len(out) >= MAX_OVERRIDES:
+            break
+    return out
+
+
+def actions_for(settings: dict, appid: str):
+    """(before, after, app name or None) for the running application.
+
+    A game or app with an override uses its own before/after; everything else uses
+    the global options."""
+    ov = normalize_overrides(settings.get("overrides")).get(appid or "")
+    if ov:
+        return ov["before"], ov["after"], ov["name"]
+    return normalize_action(settings.get("before")), normalize_action(settings.get("after")), None
+
+
 def press_order(tokens) -> list:
     """Inputs in press order: modifier keys first, then other keys, then mouse
     buttons, then controller buttons."""

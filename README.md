@@ -5,10 +5,11 @@ transcribed text is typed into whatever has focus, in gaming mode and desktop mo
 Transcription is local, using a [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 server.
 
-The panel opens as three collapsible groups (one open at a time), with the update
+The panel opens as four collapsible groups (one open at a time), with the update
 section always visible at the bottom:
+- **Global options**: the activator, what is pressed around the typed text, and Typing settings
+- **Applications**: different before / after inputs for specific Steam and non-Steam apps
 - **Models**: Current model, Choose a model (download / delete)
-- **Activator**: the activator, what is pressed around the typed text, and Typing settings
 - **Testing**: record a test, see the text, test typing
 - **Updates** (always shown): installs the latest GitHub release
 
@@ -103,6 +104,19 @@ in games).
   programs that sample input once per frame miss very short presses (xdotool's default is only
   about 6-12 ms). A pause after the "before" input (0.12/0.25/0.5 s) gives a chat box time to
   open. Nothing is pressed when there is nothing to type.
+
+### Per-application overrides
+The **Applications** group has a *Steam applications* list (installed games) and a *Non-Steam
+applications* list (shortcuts in your Steam library). Choosing one adds an override for it,
+starting from a copy of the Global options' before / after; edit them with the same None /
+Enter / Any key or combination controls, or remove the override to go back to Global options.
+
+The running game is read from the Steam interface (`Router.MainRunningApp`) and reported to
+the backend about once a second. When the text is typed, the running app's override is used if
+it has one, otherwise Global options. A report older than 12 s is ignored. This works in
+gaming mode, where Steam knows what is running; in desktop mode (no Steam interface) Global
+options always apply. The non-Steam list is whatever Steam has as shortcut-type entries, so
+it can include things like remote-play shortcuts.
 
 ## Settings
 Model, activator, typing and before/after inputs are written to two places, atomically and

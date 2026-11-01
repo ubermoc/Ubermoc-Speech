@@ -7,6 +7,7 @@ import {
   PanelSection,
   PanelSectionRow,
   ProgressBarWithInfo,
+  Router,
   ToggleField,
   definePlugin,
 } from "@decky/ui";
@@ -25,8 +26,11 @@ interface DlProgress { done: number; total: number }
 interface TypedInfo {
   status: "typed" | "panel" | "off" | "empty" | "error";
   method?: string; typed?: number; skipped?: number; note?: string; error?: string;
-  before?: string | null; after?: string | null;
+  before?: string | null; after?: string | null; app?: string | null;
 }
+interface OverrideInfo { appid: string; name: string; kind: "steam" | "shortcut"; before: KeyAction; after: KeyAction }
+interface OverridesInfo { overrides: OverrideInfo[]; running: { appid: string; name: string; has_override: boolean } }
+interface LibApp { appid: string; name: string }
 interface KeyAction { mode: "none" | "enter" | "custom"; keys: string[]; label: string; warnings: string[] }
 interface LastResult {
   ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number; by?: string;
@@ -82,8 +86,12 @@ const setUiPad = callable<[string[]], boolean>("set_ui_pad");
 const getTyping = callable<[], TypingInfo>("get_typing");
 const setTyping = callable<[boolean, string, string], TypingInfo>("set_typing");
 const typeTest = callable<[number], { ok: boolean }>("type_test");
-const setKeyAction = callable<[string, string, string[]], TypingInfo>("set_key_action");
-const startKeyCapture = callable<[string], { ok: boolean; error?: string }>("start_key_capture");
+const setKeyAction = callable<[string, string, string[], string], TypingInfo & OverridesInfo>("set_key_action");
+const startKeyCapture = callable<[string, string], { ok: boolean; error?: string }>("start_key_capture");
+const getOverrides = callable<[], OverridesInfo>("get_overrides");
+const addOverride = callable<[string, string, string], OverridesInfo>("add_override");
+const removeOverride = callable<[string], OverridesInfo>("remove_override");
+const setRunningApp = callable<[string, string], boolean>("set_running_app");
 const typeAck = callable<[string, boolean], boolean>("type_ack");
 const logBackend = callable<[string], boolean>("log");
 
@@ -130,6 +138,41 @@ function uiButton(id: number, down: boolean) {
 let lastChoice = "";
 // Which groups are expanded; kept at module level so closing and reopening the menu keeps them.
 let openGroup: string | null = null;
+
+// ---------- installed games and non-Steam apps ----------
+// Steam's own definition (its interface source): an installed Steam game is a Game whose
+// local_per_client_data.installed is true; that is what collectionStore.localGamesCollection
+// holds. Non-Steam apps are the library entries of shortcut type (1073741824).
+const APP_GAME = 1;
+const APP_SHORTCUT = 1073741824;
+
+function installedApps(): { steam: LibApp[]; other: LibApp[] } {
+  const steam: LibApp[] = [];
+  const other: LibApp[] = [];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    const local = w.collectionStore?.localGamesCollection?.allApps;
+    const all = w.appStore?.allApps;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const installed: any[] = Array.isArray(local)
+      ? local
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (Array.isArray(all) ? all : []).filter((a: any) => a?.app_type === APP_GAME && a?.local_per_client_data?.installed === true);
+    for (const a of installed) {
+      if (!a?.appid || !a?.display_name || a.app_type === APP_SHORTCUT) continue;
+      steam.push({ appid: String(a.appid), name: String(a.display_name) });
+    }
+    for (const a of Array.isArray(all) ? all : []) {
+      if (a?.app_type === APP_SHORTCUT && a?.appid && a?.display_name)
+        other.push({ appid: String(a.appid), name: String(a.display_name) });
+    }
+  } catch (e) {
+    void logBackend(`installedApps failed: ${e}`);
+  }
+  const byName = (x: LibApp, y: LibApp) => x.name.localeCompare(y.name);
+  return { steam: steam.sort(byName), other: other.sort(byName) };
+}
 
 // While an input is being recorded, the menu must ignore the controller: a press would
 // otherwise click Cancel, move the focus or close the menu before it was recorded.
@@ -204,6 +247,7 @@ const typedText = (t?: TypedInfo | null): string => {
         (t.skipped ? `, ${t.skipped} could not be typed` : "") +
         (t.before ? `; ${t.before} before` : "") +
         (t.after ? `; ${t.after} after` : "") +
+        (t.app ? ` (overrides for ${t.app})` : "") +
         (t.note ? ` - ${t.note}` : "")
       );
     case "panel": return "Not typed: this menu was open, so the text is only shown here";
@@ -240,7 +284,12 @@ function Panel() {
   const [dict, setDict] = useState<DictState>({ phase: "idle", last: null, activator_held: false });
   const [startError, setStartError] = useState("");
   const [act, setAct] = useState<ActivatorInfo | null>(null);
-  const [capTarget, setCapTarget] = useState<"activator" | "before" | "after" | null>(null);
+  // "activator", or "<before|after>@<appid>" ("" appid = Global options)
+  const [capTarget, setCapTarget] = useState<string | null>(null);
+  const [ovr, setOvr] = useState<OverridesInfo | null>(null);
+  const [selApp, setSelApp] = useState<string>("");
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const [libs, setLibs] = useState<{ steam: LibApp[]; other: LibApp[] }>({ steam: [], other: [] });
   const capturing = capTarget === "activator";
   const [keyMsg, setKeyMsg] = useState<Record<string, string>>({});
   const [capStart, setCapStart] = useState(0);
@@ -320,7 +369,8 @@ function Panel() {
           setAct(await getActivator());
         } else {
           setKeyMsg((m) => ({ ...m, [target]: msg }));
-          setTypingInfo(await getTyping());
+          if (target.endsWith("@")) setTypingInfo(await getTyping());
+          else setOvr(await getOverrides());
         }
       }
     }, 300);
@@ -363,6 +413,17 @@ function Panel() {
     else setDlError(r.error ?? "Could not switch model");
     await refresh();
   };
+
+  useEffect(() => {
+    void getOverrides().then(setOvr).catch(() => undefined);
+  }, []);
+  useEffect(() => {
+    if (open !== "apps") return;
+    setLibs(installedApps());
+    void getOverrides().then(setOvr).catch(() => undefined);
+    const t = setInterval(() => { void getOverrides().then(setOvr).catch(() => undefined); }, 3000);
+    return () => clearInterval(t);
+  }, [open]);
 
   // Accordion: opening a group closes the one that was open.
   const toggleGroup = (key: string) => {
@@ -409,28 +470,33 @@ function Panel() {
     else setCapMsg(r.error ?? "Could not start listening");
   };
 
-  const applyKeyAction = async (which: "before" | "after", mode: string, keys: string[]) => {
-    setKeyMsg((m) => ({ ...m, [which]: "" }));
-    setTypingInfo(await setKeyAction(which, mode, keys));
+  const applyKeyAction = async (which: "before" | "after", mode: string, keys: string[], appid: string) => {
+    setKeyMsg((m) => ({ ...m, [`${which}@${appid}`]: "" }));
+    const r = await setKeyAction(which, mode, keys, appid);
+    if (appid) setOvr(r);
+    else setTypingInfo(r);
   };
 
-  const beginKeyCapture = async (which: "before" | "after") => {
-    setKeyMsg((m) => ({ ...m, [which]: "" }));
+  const beginKeyCapture = async (which: "before" | "after", appid: string) => {
+    const id = `${which}@${appid}`;
+    setKeyMsg((m) => ({ ...m, [id]: "" }));
     setCap(null);
-    const r = await startKeyCapture(which);
+    const r = await startKeyCapture(which, appid);
     if (r.ok) {
       setCapStart(Date.now());
       setSecondsLeft(15);
-      setCapTarget(which);
+      setCapTarget(id);
     }
-    else setKeyMsg((m) => ({ ...m, [which]: r.error ?? "Could not start listening" }));
+    else setKeyMsg((m) => ({ ...m, [id]: r.error ?? "Could not start listening" }));
   };
 
   // What is pressed around the typed text: None, Enter, or anything you record
   // (keyboard, mouse or controller; a single input or a combination).
-  const keyActionRows = (which: "before" | "after", label: string, hint: string) => {
-    const a = typing?.[which] ?? { mode: "enter", keys: [], label: "Enter", warnings: [] };
-    const listening = capTarget === which;
+  const keyActionRows = (which: "before" | "after", label: string, hint: string, appid = "") => {
+    const found = appid ? ovr?.overrides.find((o) => o.appid === appid)?.[which] : typing?.[which];
+    const a: KeyAction = found ?? { mode: "enter", keys: [], label: "Enter", warnings: [] };
+    const id = `${which}@${appid}`;
+    const listening = capTarget === id;
     return (
       <>
         <PanelSectionRow>
@@ -443,7 +509,7 @@ function Panel() {
               { data: "custom", label: "Any key or combination" },
             ]}
             selectedOption={a.mode}
-            onChange={(o) => applyKeyAction(which, o.data as string, o.data === "custom" ? a.keys : [])}
+            onChange={(o) => applyKeyAction(which, o.data as string, o.data === "custom" ? a.keys : [], appid)}
           />
         </PanelSectionRow>
         {a.mode === "custom" && (
@@ -457,7 +523,7 @@ function Panel() {
               </PanelSectionRow>
             ) : (
               <PanelSectionRow>
-                <ButtonItem layout="below" onClick={() => beginKeyCapture(which)} description={keyMsg[which] || undefined}>
+                <ButtonItem layout="below" onClick={() => beginKeyCapture(which, appid)} description={keyMsg[id] || undefined}>
                   Record key or combination
                 </ButtonItem>
               </PanelSectionRow>
@@ -500,104 +566,22 @@ function Panel() {
     return w.unreadable ? `${text} (${w.unreadable} could not be opened)` : text;
   };
 
+  const curApp = ovr?.overrides.find((o) => o.appid === selApp) ?? ovr?.overrides[0];
+  const appsSummary = ovr?.running?.name
+    ? `Running: ${ovr.running.name}`
+    : ovr?.overrides.length ? `${ovr.overrides.length} override${ovr.overrides.length > 1 ? "s" : ""}` : "None yet";
+
+  const addApp = async (appid: string, name: string, kind: string) => {
+    const r = await addOverride(appid, name, kind);
+    setOvr(r);
+    setSelApp(appid);
+    setConfirmRemove(false);
+  };
+
   return (
     <>
-      <GroupHeader label="Models" summary={active || "No model yet"} open={open === "models"} onToggle={() => toggleGroup("models")} />
-      {open === "models" && (
-        <>
-      <PanelSection title="Current model">
-        {downloaded.length > 0 ? (
-          <PanelSectionRow>
-            <DropdownItem
-              label="Model"
-              description={activeInfo?.description ?? "Pick one of your downloaded models"}
-              rgOptions={downloaded.map((m) => ({ data: m.name, label: m.name }))}
-              selectedOption={ready ? active : undefined}
-              strDefaultLabel="Select a model"
-              onChange={(o) => useModel(o.data as string)}
-            />
-          </PanelSectionRow>
-        ) : (
-          <PanelSectionRow>
-            <Field label="No model yet" description="Download one under Choose a model, then select it here" />
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
-      <PanelSection title="Choose a model">
-        <PanelSectionRow>
-          <DropdownItem
-            label="Model"
-            description={
-              chosen
-                ? `${chosen.description} (${chosen.installed ? "downloaded" : sizeLabel(chosen.size_mb)})`
-                : "Pick a model"
-            }
-            rgOptions={models.map((m) => ({
-              data: m.name,
-              label: m.installed ? `${m.name}  -  downloaded` : `${m.name}  -  ${sizeLabel(m.size_mb)}`,
-            }))}
-            selectedOption={choice}
-            onChange={(o) => {
-              const name = o.data as string;
-              lastChoice = name;
-              setChoice(name);
-              setDlError("");
-              setConfirmDelete(false);
-              void logBackend(`choose model: ${name}`);
-            }}
-          />
-        </PanelSectionRow>
-        {chosen && !chosen.installed && !progress[chosen.name] && (
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={() => startDownload(chosen)}>
-              {dlError ? "Retry download" : "Download"} {chosen.name} ({sizeLabel(chosen.size_mb)})
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-        {chosen && chosen.installed && !progress[chosen.name] && (
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              onClick={() => removeModel(chosen)}
-              description={
-                chosen.name === active
-                  ? "This is your current model. You can download it again later."
-                  : "You can download it again later."
-              }
-            >
-              {confirmDelete ? `Tap again to delete ${chosen.name}` : `Delete ${chosen.name}`}
-            </ButtonItem>
-          </PanelSectionRow>
-        )}
-        {downloading.map(([name, p]) => (
-          <div key={name}>
-            <PanelSectionRow>
-              <ProgressBarWithInfo
-                label={`Downloading ${name}`}
-                nProgress={progressPct(p)}
-                sOperationText={progressText(p, speeds[name])}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => cancelDownload(name)}>
-                Cancel download
-              </ButtonItem>
-            </PanelSectionRow>
-          </div>
-        ))}
-        {dlError && (
-          <PanelSectionRow>
-            <Field label="Problem">{dlError}</Field>
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
-        </>
-      )}
-
-      <GroupHeader label="Activator" summary={act?.label ? act.label : "Not set"} open={open === "activator"} onToggle={() => toggleGroup("activator")} />
-      {open === "activator" && (
+      <GroupHeader label="Global options" summary={act?.label ? act.label : "Activator not set"} open={open === "global"} onToggle={() => toggleGroup("global")} />
+      {open === "global" && (
         <>
       <PanelSection title="Activator">
         <PanelSectionRow>
@@ -707,6 +691,171 @@ function Panel() {
             {typing ? (typing.keyboard.available ? "Ready" : `Unavailable: ${typing.keyboard.reason}`) : "..."}
           </Field>
         </PanelSectionRow>
+      </PanelSection>
+
+        </>
+      )}
+
+      <GroupHeader label="Applications" summary={appsSummary} open={open === "apps"} onToggle={() => toggleGroup("apps")} />
+      {open === "apps" && (
+        <>
+      <PanelSection title="Per-application overrides">
+        <PanelSectionRow>
+          <Field
+            label="Running now"
+            description="Press before / after typing can be different for a game or app. Anything without an override uses Global options. Works in gaming mode, where Steam knows what is running."
+          >
+            {ovr?.running?.name ? `${ovr.running.name}${ovr.running.has_override ? " (override)" : " (Global options)"}` : "Nothing"}
+          </Field>
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Steam applications"
+            description="Installed games. Choosing one adds an override for it."
+            strDefaultLabel={libs.steam.length ? "Choose a game..." : "No installed games found"}
+            rgOptions={libs.steam.map((a) => ({ data: a.appid, label: a.name }))}
+            selectedOption={null}
+            onChange={(o) => addApp(o.data as string, o.label as string, "steam")}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <DropdownItem
+            label="Non-Steam applications"
+            description="Apps added to your Steam library as non-Steam shortcuts."
+            strDefaultLabel={libs.other.length ? "Choose an app..." : "No non-Steam apps found"}
+            rgOptions={libs.other.map((a) => ({ data: a.appid, label: a.name }))}
+            selectedOption={null}
+            onChange={(o) => addApp(o.data as string, o.label as string, "shortcut")}
+          />
+        </PanelSectionRow>
+        {(ovr?.overrides.length ?? 0) > 0 && (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Edit override for"
+              rgOptions={(ovr?.overrides ?? []).map((o) => ({
+                data: o.appid,
+                label: `${o.name} - ${o.before.label} / ${o.after.label}`,
+              }))}
+              selectedOption={curApp?.appid ?? null}
+              onChange={(o) => { setSelApp(o.data as string); setConfirmRemove(false); }}
+            />
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
+      {curApp && (
+        <PanelSection title={curApp.name}>
+          {keyActionRows("before", "Press before typing", "Pressed first, then the text is typed.", curApp.appid)}
+          {keyActionRows("after", "Press after typing", "Pressed once the text is typed.", curApp.appid)}
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={async () => {
+                if (!confirmRemove) { setConfirmRemove(true); return; }
+                setConfirmRemove(false);
+                const r = await removeOverride(curApp.appid);
+                setOvr(r);
+                setSelApp("");
+              }}
+              description={confirmRemove ? "Press again to confirm" : "Goes back to Global options for this app"}
+            >
+              {confirmRemove ? "Confirm: remove override" : "Remove override"}
+            </ButtonItem>
+          </PanelSectionRow>
+        </PanelSection>
+      )}
+        </>
+      )}
+
+      <GroupHeader label="Models" summary={active || "No model yet"} open={open === "models"} onToggle={() => toggleGroup("models")} />
+      {open === "models" && (
+        <>
+      <PanelSection title="Current model">
+        {downloaded.length > 0 ? (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Model"
+              description={activeInfo?.description ?? "Pick one of your downloaded models"}
+              rgOptions={downloaded.map((m) => ({ data: m.name, label: m.name }))}
+              selectedOption={ready ? active : undefined}
+              strDefaultLabel="Select a model"
+              onChange={(o) => useModel(o.data as string)}
+            />
+          </PanelSectionRow>
+        ) : (
+          <PanelSectionRow>
+            <Field label="No model yet" description="Download one under Choose a model, then select it here" />
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
+      <PanelSection title="Choose a model">
+        <PanelSectionRow>
+          <DropdownItem
+            label="Model"
+            description={
+              chosen
+                ? `${chosen.description} (${chosen.installed ? "downloaded" : sizeLabel(chosen.size_mb)})`
+                : "Pick a model"
+            }
+            rgOptions={models.map((m) => ({
+              data: m.name,
+              label: m.installed ? `${m.name}  -  downloaded` : `${m.name}  -  ${sizeLabel(m.size_mb)}`,
+            }))}
+            selectedOption={choice}
+            onChange={(o) => {
+              const name = o.data as string;
+              lastChoice = name;
+              setChoice(name);
+              setDlError("");
+              setConfirmDelete(false);
+              void logBackend(`choose model: ${name}`);
+            }}
+          />
+        </PanelSectionRow>
+        {chosen && !chosen.installed && !progress[chosen.name] && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => startDownload(chosen)}>
+              {dlError ? "Retry download" : "Download"} {chosen.name} ({sizeLabel(chosen.size_mb)})
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {chosen && chosen.installed && !progress[chosen.name] && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              onClick={() => removeModel(chosen)}
+              description={
+                chosen.name === active
+                  ? "This is your current model. You can download it again later."
+                  : "You can download it again later."
+              }
+            >
+              {confirmDelete ? `Tap again to delete ${chosen.name}` : `Delete ${chosen.name}`}
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {downloading.map(([name, p]) => (
+          <div key={name}>
+            <PanelSectionRow>
+              <ProgressBarWithInfo
+                label={`Downloading ${name}`}
+                nProgress={progressPct(p)}
+                sOperationText={progressText(p, speeds[name])}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={() => cancelDownload(name)}>
+                Cancel download
+              </ButtonItem>
+            </PanelSectionRow>
+          </div>
+        ))}
+        {dlError && (
+          <PanelSectionRow>
+            <Field label="Problem">{dlError}</Field>
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
         </>
@@ -886,6 +1035,27 @@ export default definePlugin(() => {
   };
   addEventListener("type_text", onTypeText);
 
+  // Tell the backend which game / app is in front, so it can pick that app's overrides.
+  let lastApp = "";
+  let lastSent = 0;
+  const reportApp = () => {
+    try {
+      const app = Router?.MainRunningApp;
+      const id = app?.appid ? String(app.appid) : "";
+      const name = id ? String(app?.display_name ?? "") : "";
+      const now = Date.now();
+      if (id !== lastApp || now - lastSent > 3000) {
+        lastApp = id;
+        lastSent = now;
+        void setRunningApp(id, name);
+      }
+    } catch {
+      /* Router may not exist on this Steam build */
+    }
+  };
+  reportApp();
+  const appTimer = setInterval(reportApp, 1000);
+
   // The feed stops after the machine sleeps; a long gap between ticks means it did.
   let lastTick = Date.now();
   const resume = setInterval(() => {
@@ -910,6 +1080,7 @@ export default definePlugin(() => {
     icon: <FaMicrophone />,
     onDismount() {
       clearInterval(resume);
+      clearInterval(appTimer);
       removeEventListener("type_text", onTypeText);
       unregister();
       uiHeld.clear();
