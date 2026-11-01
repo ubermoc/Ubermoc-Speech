@@ -483,3 +483,21 @@ class SpokenSymbols(unittest.TestCase):
     def test_every_symbol_can_be_typed(self):
         for _n, ch, _h in ut.SPOKEN_SYMBOLS:
             self.assertIn(ch, ut.CHAR_MAP)
+
+
+class OverrideSymbols(unittest.TestCase):
+    def test_follows_global_unless_overridden(self):
+        ov = {"570": {"name": "Dota 2", "kind": "steam", "before": {"mode": "enter", "keys": []},
+                      "after": {"mode": "enter", "keys": []}, "symbols": "symbols"},
+              "730": {"name": "CS", "kind": "steam", "before": {"mode": "enter", "keys": []},
+                      "after": {"mode": "enter", "keys": []}}}
+        s = {"overrides": ov, "type_symbols": "words"}
+        self.assertEqual(ut.symbols_for(s, "570"), "symbols")
+        self.assertEqual(ut.symbols_for(s, "730"), "words")       # no choice stored: follows global
+        self.assertEqual(ut.symbols_for(s, "999"), "words")
+        s["type_symbols"] = "symbols"
+        self.assertEqual(ut.symbols_for(s, "730"), "symbols")
+        ov["570"]["symbols"] = "words"
+        self.assertEqual(ut.symbols_for(s, "570"), "words")
+        ov["570"]["symbols"] = "junk"
+        self.assertEqual(ut.symbols_for(s, "570"), "symbols")      # invalid value ignored

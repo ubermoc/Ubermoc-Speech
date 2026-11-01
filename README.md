@@ -109,8 +109,8 @@ in games).
 ### Per-application overrides
 The **Applications** group has a *Steam applications* list (installed games) and a *Non-Steam
 applications* list (shortcuts in your Steam library). Choosing one adds an override for it,
-starting from a copy of the Global options' before / after; edit them with the same None /
-Enter / Any key or combination controls, or remove the override to go back to Global options.
+starting from a copy of the Global options' before / after and Spoken symbols; edit them with the same None /
+Enter / Any key or combination controls, or remove the override to go back to Global options. Each override also has its own *Spoken symbols* choice (type the word or the symbol); an override saved before this existed follows the Global option.
 
 The running game is read from the Steam interface (`Router.MainRunningApp`) and reported to
 the backend when Steam announces an app starting or stopping, and each time you start dictating (no polling). The running app's override is used if

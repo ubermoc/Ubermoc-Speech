@@ -432,7 +432,7 @@ class Plugin:
             if time.time() - self.panel_seen < 1.5:
                 return {"status": "panel"}      # the menu is open: show the text there instead
         cleaned = ubermoc_typing.clean_for_typing(text)
-        if cleaned and s.get("type_symbols") == "symbols":
+        if cleaned and ubermoc_typing.symbols_for(s, self._running_appid()) == "symbols":
             cleaned = ubermoc_typing.spoken_symbols(cleaned)
         if not cleaned:
             return {"status": "empty"}
@@ -596,10 +596,12 @@ class Plugin:
     async def get_overrides(self) -> dict:
         overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
         running = self._running_appid()
+        glob_symbols = "symbols" if self._load_settings().get("type_symbols") == "symbols" else "words"
         return {
             "overrides": [
                 {"appid": appid, "name": ov["name"], "kind": ov["kind"],
-                 "before": self._action_info(ov["before"]), "after": self._action_info(ov["after"])}
+                 "before": self._action_info(ov["before"]), "after": self._action_info(ov["after"]),
+                 "symbols": ov.get("symbols") or glob_symbols}
                 for appid, ov in sorted(overrides.items(), key=lambda kv: kv[1]["name"].lower())
             ],
             "running": {"appid": running, "name": (self.running_app or {}).get("name", "") if running else "",
@@ -617,8 +619,16 @@ class Plugin:
                 "name": name, "kind": "shortcut" if kind == "shortcut" else "steam",
                 "before": ubermoc_typing.normalize_action(s.get("before")),
                 "after": ubermoc_typing.normalize_action(s.get("after")),
+                "symbols": "symbols" if s.get("type_symbols") == "symbols" else "words",
             }
             self._save_settings(overrides=ubermoc_typing.normalize_overrides(overrides))
+        return await Plugin.get_overrides(self)
+
+    async def set_override_symbols(self, appid: str, symbols: str) -> dict:
+        overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
+        if str(appid) in overrides:
+            overrides[str(appid)]["symbols"] = "symbols" if symbols == "symbols" else "words"
+            self._save_settings(overrides=overrides)
         return await Plugin.get_overrides(self)
 
     async def remove_override(self, appid: str) -> dict:

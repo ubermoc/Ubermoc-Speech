@@ -27,7 +27,7 @@ interface TypedInfo {
   method?: string; typed?: number; skipped?: number; note?: string; error?: string;
   before?: string | null; after?: string | null; app?: string | null;
 }
-interface OverrideInfo { appid: string; name: string; kind: "steam" | "shortcut"; before: KeyAction; after: KeyAction }
+interface OverrideInfo { appid: string; name: string; kind: "steam" | "shortcut"; before: KeyAction; after: KeyAction; symbols: "words" | "symbols" }
 interface OverridesInfo { overrides: OverrideInfo[]; running: { appid: string; name: string; has_override: boolean } }
 interface LibApp { appid: string; name: string }
 interface KeyAction { mode: "none" | "enter" | "custom"; keys: string[]; label: string; warnings: string[] }
@@ -89,6 +89,7 @@ const setKeyAction = callable<[string, string, string[], string], TypingInfo & O
 const startKeyCapture = callable<[string, string], { ok: boolean; error?: string }>("start_key_capture");
 const getOverrides = callable<[], OverridesInfo>("get_overrides");
 const addOverride = callable<[string, string, string], OverridesInfo>("add_override");
+const setOverrideSymbols = callable<[string, string], OverridesInfo>("set_override_symbols");
 const removeOverride = callable<[string], OverridesInfo>("remove_override");
 const setRunningApp = callable<[string, string], boolean>("set_running_app");
 const typeAck = callable<[string, boolean], boolean>("type_ack");
@@ -756,6 +757,18 @@ function Panel() {
         <PanelSection title={curApp.name}>
           {keyActionRows("before", "Press before typing", "Pressed first, then the text is typed.", curApp.appid)}
           {keyActionRows("after", "Press after typing", "Pressed once the text is typed.", curApp.appid)}
+          <PanelSectionRow>
+            <DropdownItem
+              label="Spoken symbols"
+              description={curApp.symbols === "symbols" ? 'Saying "backslash" types \\ in this app.' : 'Saying "backslash" types the word in this app.'}
+              rgOptions={[
+                { data: "words", label: "Type the word (backslash)" },
+                { data: "symbols", label: "Type the symbol (\\)" },
+              ]}
+              selectedOption={curApp.symbols}
+              onChange={async (o) => setOvr(await setOverrideSymbols(curApp.appid, o.data as string))}
+            />
+          </PanelSectionRow>
           <PanelSectionRow>
             <ButtonItem
               layout="below"

@@ -250,6 +250,8 @@ def normalize_overrides(raw) -> dict:
             "before": normalize_action(entry.get("before")),
             "after": normalize_action(entry.get("after")),
         }
+        if entry.get("symbols") in ("words", "symbols"):
+            out[appid]["symbols"] = entry["symbols"]     # absent = follows the global option
         if len(out) >= MAX_OVERRIDES:
             break
     return out
@@ -264,6 +266,14 @@ def actions_for(settings: dict, appid: str):
     if ov:
         return ov["before"], ov["after"], ov["name"]
     return normalize_action(settings.get("before")), normalize_action(settings.get("after")), None
+
+
+def symbols_for(settings: dict, appid: str) -> str:
+    """"words" or "symbols": the running app's spoken-symbols choice, else the global one."""
+    ov = normalize_overrides(settings.get("overrides")).get(appid or "")
+    if ov and ov.get("symbols"):
+        return ov["symbols"]
+    return "symbols" if settings.get("type_symbols") == "symbols" else "words"
 
 
 def press_order(tokens) -> list:
