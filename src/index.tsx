@@ -26,9 +26,7 @@ interface TypedInfo {
   method?: string; typed?: number; skipped?: number; note?: string; error?: string;
   before?: string | null; after?: string | null;
 }
-interface KeyAction { mode: "none" | "enter" | "custom"; keys: string[]; label: string }
-interface KeyOption { code: number; label: string }
-interface ModOption { label: string; codes: number[] }
+interface KeyAction { mode: "none" | "enter" | "custom"; keys: string[]; label: string; warnings: string[] }
 interface LastResult {
   ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number; by?: string;
   typed?: TypedInfo;
@@ -40,8 +38,6 @@ interface TypingInfo {
   keyboard: { available: boolean; reason: string };
   before: KeyAction;
   after: KeyAction;
-  key_options: KeyOption[];
-  mod_options: ModOption[];
   test: (TypedInfo & { at: number }) | null;
 }
 interface DictState { phase: Phase; last: LastResult | null; activator_held: boolean }
@@ -368,22 +364,11 @@ function Panel() {
     else setKeyMsg((m) => ({ ...m, [which]: r.error ?? "Could not start listening" }));
   };
 
-  // The keys pressed around the typed text: None, Enter, or any key / combination.
-  const MODIFIERS = [29, 42, 56, 125];
+  // What is pressed around the typed text: None, Enter, or anything you record
+  // (keyboard, mouse or controller; a single input or a combination).
   const keyActionRows = (which: "before" | "after", label: string, hint: string) => {
-    const a = typing?.[which] ?? { mode: "enter", keys: [], label: "Enter" };
-    const codes = a.keys.map((t) => Number(t.slice(4)));
-    const mods = codes.filter((c) => MODIFIERS.includes(c));
-    const main = codes.find((c) => !MODIFIERS.includes(c));
-    const modIndex = Math.max(
-      0,
-      (typing?.mod_options ?? []).findIndex(
-        (o) => [...o.codes].sort().join() === [...mods].sort().join()
-      )
-    );
+    const a = typing?.[which] ?? { mode: "enter", keys: [], label: "Enter", warnings: [] };
     const listening = capTarget === which;
-    const setCustom = (modCodes: number[], mainCode?: number) =>
-      applyKeyAction(which, "custom", [...modCodes, ...(mainCode !== undefined ? [mainCode] : [])].map((c) => `key:${c}`));
     return (
       <>
         <PanelSectionRow>
@@ -393,7 +378,7 @@ function Panel() {
             rgOptions={[
               { data: "none", label: "None" },
               { data: "enter", label: "Enter" },
-              { data: "custom", label: "Custom key or combination" },
+              { data: "custom", label: "Any key or combination" },
             ]}
             selectedOption={a.mode}
             onChange={(o) => applyKeyAction(which, o.data as string, o.data === "custom" ? a.keys : [])}
@@ -402,39 +387,27 @@ function Panel() {
         {a.mode === "custom" && (
           <>
             <PanelSectionRow>
-              <Field label="Keys">{listening ? (cap?.label || "waiting for keys...") : a.label}</Field>
+              <Field label="Input">{listening ? (cap?.label || "waiting for input...") : a.label}</Field>
             </PanelSectionRow>
             {listening ? (
               <PanelSectionRow>
                 <ButtonItem layout="below" onClick={() => cancelCapture()}
-                  description="Hold the keys together on a keyboard, then let go. Your keyboard is paused while listening.">
+                  description="Press and hold your keys or buttons together, then let go. Works for keyboard, mouse and controller.">
                   Listening... tap to cancel
                 </ButtonItem>
               </PanelSectionRow>
             ) : (
               <PanelSectionRow>
                 <ButtonItem layout="below" onClick={() => beginKeyCapture(which)} description={keyMsg[which] || undefined}>
-                  Record from a keyboard
+                  Record key or combination
                 </ButtonItem>
               </PanelSectionRow>
             )}
-            <PanelSectionRow>
-              <DropdownItem
-                label="Hold with"
-                rgOptions={(typing?.mod_options ?? []).map((o, i) => ({ data: i, label: o.label }))}
-                selectedOption={modIndex}
-                onChange={(o) => setCustom(typing?.mod_options[o.data as number]?.codes ?? [], main)}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <DropdownItem
-                label="Key"
-                rgOptions={(typing?.key_options ?? []).map((k) => ({ data: k.code, label: k.label }))}
-                selectedOption={main}
-                strDefaultLabel="Choose a key..."
-                onChange={(o) => setCustom(mods, o.data as number)}
-              />
-            </PanelSectionRow>
+            {a.warnings.map((w) => (
+              <PanelSectionRow key={w}>
+                <Field label="Note">{w}</Field>
+              </PanelSectionRow>
+            ))}
           </>
         )}
       </>

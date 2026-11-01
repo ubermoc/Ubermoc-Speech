@@ -86,6 +86,7 @@ class Plugin:
     act_down: bool = False
     hub = None
     keyboard = None                # the virtual keyboard, created on first use
+    presser = None                 # presses keys / mouse buttons / controller buttons
     panel_seen: float = 0.0        # last time the panel polled (it is open if recent)
     type_acks: dict = {}
     last_typing_test: dict | None = None
@@ -100,6 +101,7 @@ class Plugin:
         tokens = ubermoc_input.valid_tokens(settings.get("activator"))
         if tokens:
             self.hub.set_activator(tokens)
+        asyncio.ensure_future(Plugin._prepare_outputs_if_custom(self))
         decky.logger.info(
             f"Ubermoc Speech loaded: model={'set' if settings.get('model') else 'default'}, "
             f"activator={len(tokens)} input(s), settings from {self._store().paths}")
@@ -109,6 +111,8 @@ class Plugin:
             self.hub.stop()
         if self.keyboard:
             self.keyboard.close()
+        if self.presser:
+            self.presser.close()
         self._stop_recorder()
         await Plugin.stop_server(self)
 
@@ -439,10 +443,10 @@ class Plugin:
         notes = []
         pressed_before = pressed_after = None
 
-        if ubermoc_typing.action_codes(before):
-            err = await Plugin._press(self, ubermoc_typing.action_codes(before), hold)
+        if ubermoc_typing.action_tokens(before):
+            err = await Plugin._press(self, ubermoc_typing.action_tokens(before), hold)
             if err:
-                notes.append(f"The key before the text was not pressed: {err}")
+                notes.append(f"The input before the text was not pressed: {err}")
             else:
                 pressed_before = ubermoc_typing.action_label(before)
                 await asyncio.sleep(settle_before)      # give a chat box time to open
@@ -461,28 +465,55 @@ class Plugin:
                 decky.logger.error(f"typing failed: {e}")
                 return {"status": "error", "error": str(e), "before": pressed_before}
 
-        if ubermoc_typing.action_codes(after):
+        if ubermoc_typing.action_tokens(after):
             await asyncio.sleep(settle_after)
-            err = await Plugin._press(self, ubermoc_typing.action_codes(after), hold)
+            err = await Plugin._press(self, ubermoc_typing.action_tokens(after), hold)
             if err:
-                notes.append(f"The key after the text was not pressed: {err}")
+                notes.append(f"The input after the text was not pressed: {err}")
             else:
                 pressed_after = ubermoc_typing.action_label(after)
         return {**result, "before": pressed_before, "after": pressed_after, "note": " ".join(notes)}
 
-    async def _press(self, codes: list, hold: float) -> str:
-        """Press a key/combination on the virtual keyboard. Returns "" or an error text."""
+    def _get_presser(self):
+        if self.keyboard is None:
+            self.keyboard = ubermoc_typing.VirtualKeyboard()
+        if self.presser is None:
+            self.presser = ubermoc_typing.Presser(self.keyboard)
+        return self.presser
+
+    async def _press(self, tokens: list, hold: float) -> str:
+        """Press keys / mouse buttons / controller buttons on the virtual devices.
+        Returns "" or an error text."""
         def work():
-            if self.keyboard is None:
-                self.keyboard = ubermoc_typing.VirtualKeyboard()
-            self.keyboard.press_keys(codes, hold)
+            return self._get_presser().press(tokens, hold)
 
         try:
-            await asyncio.get_event_loop().run_in_executor(None, work)
+            r = await asyncio.get_event_loop().run_in_executor(None, work)
+            if r["skipped"] and not r["pressed"]:
+                return f"{', '.join(r['skipped'])} cannot be pressed on a virtual device"
             return ""
         except ubermoc_typing.KeyboardError as e:
-            decky.logger.error(f"key press failed: {e}")
+            decky.logger.error(f"input press failed: {e}")
             return str(e)
+
+    async def _prepare_outputs_if_custom(self):
+        """At startup, only bother when a before/after input needs a mouse or gamepad."""
+        s = self._load_settings()
+        for which in ("before", "after"):
+            if any(not t.startswith("key:") for t in ubermoc_typing.action_tokens(s.get(which))):
+                await Plugin._prepare_outputs(self)
+                return
+
+    async def _prepare_outputs(self):
+        """Create the virtual devices the chosen before/after inputs need, ahead of
+        time, so the first press is not lost while the desktop notices a new device."""
+        s = self._load_settings()
+        tokens = (ubermoc_typing.action_tokens(s.get("before", ubermoc_typing.DEFAULT_ACTION))
+                  + ubermoc_typing.action_tokens(s.get("after", ubermoc_typing.DEFAULT_ACTION)))
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, self._get_presser().prepare, tokens)
+        except ubermoc_typing.KeyboardError as e:
+            decky.logger.warning(f"could not prepare virtual devices: {e}")
 
     def _type_blocking(self, text: str, delay: float) -> dict:
         if self.keyboard is None:
@@ -510,7 +541,8 @@ class Plugin:
 
     def _action(self, which: str) -> dict:
         action = ubermoc_typing.normalize_action(self._load_settings().get(which))
-        return {**action, "label": ubermoc_typing.action_label(action)}
+        return {**action, "label": ubermoc_typing.action_label(action),
+                "warnings": ubermoc_typing.action_warnings(action)}
 
     async def get_typing(self) -> dict:
         s = self._load_settings()
@@ -522,8 +554,6 @@ class Plugin:
             "keyboard": {"available": available, "reason": reason},
             "before": self._action("before"),
             "after": self._action("after"),
-            "key_options": ubermoc_typing.KEY_OPTIONS,
-            "mod_options": ubermoc_typing.MOD_OPTIONS,
             "test": self.last_typing_test,
         }
 
@@ -536,23 +566,27 @@ class Plugin:
         return await Plugin.get_typing(self)
 
     async def set_key_action(self, which: str, mode: str, keys: list) -> dict:
-        """Choose what is pressed before/after the typed text: none, Enter, or keys."""
+        """Choose what is pressed before/after the typed text: None, Enter, or any
+        recorded key / mouse button / controller button (or a combination)."""
         if which in ("before", "after"):
             self._save_settings(**{which: ubermoc_typing.normalize_action({"mode": mode, "keys": keys})})
+            asyncio.ensure_future(Plugin._prepare_outputs(self))
         return await Plugin.get_typing(self)
 
     async def start_key_capture(self, which: str) -> dict:
-        """Listen for the keyboard keys the user holds together, then lets go of."""
+        """Listen for what the user holds together and then lets go of: a keyboard,
+        a mouse or a controller, exactly like recording the activator."""
         if which not in ("before", "after") or not self.hub:
             return {"ok": False, "error": "input is not available"}
         self.hub.begin_capture(
-            timeout=15.0, kinds=("key",), purpose=which,
+            timeout=15.0, purpose=which,
             on_done=lambda toks, w=which: Plugin._key_captured(self, w, toks))
         return {"ok": True}
 
     def _key_captured(self, which: str, tokens: list):
         if tokens:
             self._save_settings(**{which: ubermoc_typing.normalize_action({"mode": "custom", "keys": tokens})})
+            asyncio.ensure_future(Plugin._prepare_outputs(self))
 
     async def type_test(self, delay_s: float = 5.0) -> dict:
         """Type a short sentence after a delay (so the user can click a text box first)."""

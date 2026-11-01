@@ -54,6 +54,9 @@ VENDOR_VALVE = 0x28DE
 # The plugin's own virtual keyboard (see ubermoc_typing). Never read as an activator
 # source, so the text it types can never trigger the activator.
 VIRTUAL_KEYBOARD_NAME = "Ubermoc Speech Keyboard"
+VIRTUAL_MOUSE_NAME = "Ubermoc Speech Mouse"
+VIRTUAL_GAMEPAD_NAME = "Ubermoc Speech Gamepad"
+VIRTUAL_DEVICE_NAMES = {VIRTUAL_KEYBOARD_NAME, VIRTUAL_MOUSE_NAME, VIRTUAL_GAMEPAD_NAME}
 PRODUCT_STEAM_VIRTUAL_PAD = 0x11FF   # Steam's emulated "X-Box 360 pad N"
 
 # --- Valve controllers (raw HID) -----------------------------------------------
@@ -456,7 +459,7 @@ class InputHub:
             found[node] = (model, name)
         self._emulated = []
         for d in devices:
-            if d["name"] == VIRTUAL_KEYBOARD_NAME:
+            if d["name"] in VIRTUAL_DEVICE_NAMES:
                 continue
             if d["vendor"] == VENDOR_VALVE and d.get("raw_kind") in ("keyboard", "mouse"):
                 self._emulated.append("input/" + d["event"])
@@ -607,41 +610,29 @@ class InputHub:
     def _capture_active(self):
         return bool(self._capture and self._capture["state"] == "active")
 
-    def begin_capture(self, timeout=15.0, on_done=None, kinds=None, purpose="activator"):
-        """Record the next combination the user holds and then releases.
-
-        kinds limits what counts, e.g. ("key",) records keyboard keys only (used for
-        the keys pressed around the typed text, where controller buttons and mouse
-        clicks make no sense and the button used to start recording must not leak in).
-        """
+    def begin_capture(self, timeout=15.0, on_done=None, purpose="activator"):
+        """Record the next combination the user holds and then releases. Anything
+        that can produce an input counts: keyboard keys, mouse buttons, controller
+        buttons. `purpose` says what the recording is for (the panel shows it)."""
         self.cancel_capture()
         self.start()
         self.rescan()
         self._grab_all()
         self._capture = {
-            "state": "active", "t0": time.monotonic(), "kinds": tuple(kinds) if kinds else None,
+            "state": "active", "pre": set(self._held), "t0": time.monotonic(),
             "acc": set(), "tokens": [], "on_done": on_done, "purpose": purpose,
             "timer": self._loop.call_later(timeout, self._capture_timeout),
         }
-        self._capture["pre"] = set(self._capture_held())
-
-    def _capture_held(self):
-        """Held inputs that count for the current capture."""
-        kinds = self._capture["kinds"] if self._capture else None
-        if not kinds:
-            return set(self._held)
-        return {t for t in self._held if t.partition(":")[0] in kinds}
 
     def _capture_step(self):
         cap = self._capture
-        held = self._capture_held()
-        cap["pre"] &= held                          # released => no longer excluded
-        fresh = held - cap["pre"]
+        cap["pre"] &= self._held                    # released => no longer excluded
+        fresh = set(self._held) - cap["pre"]
         if time.monotonic() - cap["t0"] < self.GRACE_S:
             cap["pre"] |= fresh                     # the click that started the capture
             fresh = set()
         cap["acc"] |= fresh
-        if cap["acc"] and not (held - cap["pre"]):
+        if cap["acc"] and not (set(self._held) - cap["pre"]):
             self._finish_capture("done")
 
     def _capture_timeout(self):
