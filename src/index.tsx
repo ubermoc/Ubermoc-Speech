@@ -138,6 +138,8 @@ function uiButton(id: number, down: boolean) {
 let lastChoice = "";
 // Which groups are expanded; kept at module level so closing and reopening the menu keeps them.
 let openGroup: string | null = null;
+// The app being edited in Applications; module level because Decky can re-create the panel.
+let editedApp = "";
 
 // ---------- installed games and non-Steam apps ----------
 // Steam's own definition (its interface source): an installed Steam game is a Game whose
@@ -287,7 +289,8 @@ function Panel() {
   // "activator", or "<before|after>@<appid>" ("" appid = Global options)
   const [capTarget, setCapTarget] = useState<string | null>(null);
   const [ovr, setOvr] = useState<OverridesInfo | null>(null);
-  const [selApp, setSelApp] = useState<string>("");
+  const [selApp, setSelAppState] = useState<string>(editedApp);
+  const setSelApp = (id: string) => { editedApp = id; setSelAppState(id); };
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [libs, setLibs] = useState<{ steam: LibApp[]; other: LibApp[] }>({ steam: [], other: [] });
   const capturing = capTarget === "activator";
