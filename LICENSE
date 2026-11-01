@@ -1,21 +1,57 @@
-MIT License
+Ubermoc Speech - Proprietary Licence
+Copyright (c) 2026 ubermoc. All rights reserved.
 
-Copyright (c) 2026 ubermoc
+1. Ownership. The source code, compiled output, documentation, design, structure and
+   all other original material in this repository and its releases (the "Software") are
+   the exclusive property of ubermoc. No right is granted except those stated here.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+2. What you may do. You may install the officially published release of the plugin
+   (from https://github.com/ubermoc/Ubermoc-Speech) through Decky Loader, run it, and
+   use it for your own personal, non-commercial purposes, unmodified.
+   You may view the source code in this repository for reading and review only.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+3. What you may not do, without the prior written permission of ubermoc:
+   a. copy, reproduce, republish, mirror, host or redistribute the Software or any part
+      of it, in source or compiled form, including on other repositories or stores;
+   b. modify, adapt, translate, port or create derivative works of it, or rewrite,
+      paraphrase or re-implement it with the Software as a reference, whether by hand
+      or with the help of any tool, including an AI or machine-learning system;
+   c. use the Software, its code, text, or any output derived from reading it, to train,
+      fine-tune, evaluate or build any machine-learning, code-generation or
+      retrieval system or dataset, or feed it to such a system to produce similar code;
+   d. sell, rent, sublicense or use it commercially or as part of another product;
+   e. remove, alter or obscure any copyright notice, licence text or provenance
+      identifier, or strip them to hide where code came from;
+   f. reverse-engineer or decompile it, except where the law does not allow this
+      restriction.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+4. Provenance. Files carry copyright headers and a provenance identifier
+   (ubermoc-speech/8fb7b6c1-05a7-4b68-908f-9d76c129be5c), and the Git history records when
+   the code was written. Finding that identifier, or code matching this Software, in
+   another work is evidence of copying.
+
+5. Termination. Any breach ends your rights under this licence immediately. ubermoc may
+   take any action the law allows, including takedown requests (such as DMCA notices) to
+   hosts and platforms.
+
+6. Third-party components. These are not owned by ubermoc and keep their own licences:
+   - bin/whisper-server is built from whisper.cpp (MIT licence,
+     Copyright (c) 2023-2026 The ggml authors) and bin/libgomp.so.1 is part of GCC's
+     OpenMP runtime (GPL-3.0 with the GCC Runtime Library Exception). Whisper model
+     files are downloaded separately under their own terms.
+   - Libraries used to build the interface (React, @decky/ui, @decky/api, react-icons)
+     are under their own licences.
+   Nothing in this licence restricts what those licences grant for those components.
+
+7. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. ubermoc
+   IS NOT LIABLE FOR ANY CLAIM, DAMAGE OR LOSS ARISING FROM ITS USE.
+
+8. Hosting. Hosting this repository publicly on GitHub does not make the Software open
+   source. GitHub's Terms of Service allow only the viewing and forking that the
+   platform itself needs to function; they grant no other rights.
+
+Earlier versions of this repository (before 0.23) were published under the MIT licence.
+Copies already obtained under that licence stay under it; all new versions are licensed
+as above.
+
+Contact: open an issue at https://github.com/ubermoc/Ubermoc-Speech for permission requests.

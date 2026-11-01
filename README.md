@@ -134,3 +134,10 @@ Tests: `python3 -m unittest discover -s tests -v`. Key names are generated from 
 header by `scripts/gen_codes.py`.
 
 Earlier experiments are in the git history and on the `experimental-v0.01` branch.
+
+## Licence
+Copyright (c) 2026 ubermoc. All rights reserved. This is **not** open source: you may install
+and use the official release, and read the code, but copying, modifying, redistributing, or
+using it to train or prompt AI systems is not allowed. See `LICENSE`. Third-party components
+(whisper.cpp and others) keep their own licences, see `THIRD_PARTY.md`. Versions before 0.23
+were published under the MIT licence.
