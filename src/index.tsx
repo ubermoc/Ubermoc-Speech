@@ -1,11 +1,8 @@
 import { callable } from "@decky/api";
 import {
   ButtonItem,
-  DialogButton,
-  Dropdown,
   DropdownItem,
   Field,
-  Focusable,
   PanelSection,
   PanelSectionRow,
   ProgressBarWithInfo,
@@ -47,6 +44,9 @@ const logBackend = callable<[string], boolean>("log");
 // ---------- panel ----------
 type Phase = "idle" | "starting" | "recording" | "transcribing";
 
+// Remembers the model being browsed, even if the panel is rebuilt.
+let lastChoice = "";
+
 const sizeLabel = (mb: number) => (mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`);
 const MB = 1024 * 1024;
 interface Speed { done: number; t: number; mbps: number }
@@ -83,11 +83,12 @@ function Panel() {
     const m = await listModels();
     setModels(m.models);
     setActive(m.selected);
-    setChoice((c) => c || m.selected || m.models[0]?.name || "");
+    setChoice((c) => c || lastChoice || m.selected || m.models[0]?.name || "");
     setStatus(await getStatus());
   };
 
   useEffect(() => {
+    void logBackend("panel mounted");
     void refresh();
     void checkUpdate().then(setUpd);
     const t = setInterval(async () => {
@@ -186,6 +187,59 @@ function Panel() {
         )}
       </PanelSection>
 
+      <PanelSection title="Choose a model">
+        <PanelSectionRow>
+          <DropdownItem
+            label="Model"
+            description={
+              chosen
+                ? `${chosen.description} (${chosen.installed ? "downloaded" : sizeLabel(chosen.size_mb)})`
+                : "Pick a model"
+            }
+            rgOptions={models.map((m) => ({
+              data: m.name,
+              label: m.installed ? `${m.name}  -  downloaded` : `${m.name}  -  ${sizeLabel(m.size_mb)}`,
+            }))}
+            selectedOption={choice}
+            onChange={(o) => {
+              const name = o.data as string;
+              lastChoice = name;
+              setChoice(name);
+              setDlError("");
+              void logBackend(`choose model: ${name}`);
+            }}
+          />
+        </PanelSectionRow>
+        {chosen && !chosen.installed && !progress[chosen.name] && (
+          <PanelSectionRow>
+            <ButtonItem layout="below" onClick={() => startDownload(chosen)}>
+              {dlError ? "Retry download" : "Download"} {chosen.name} ({sizeLabel(chosen.size_mb)})
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
+        {downloading.map(([name, p]) => (
+          <div key={name}>
+            <PanelSectionRow>
+              <ProgressBarWithInfo
+                label={`Downloading ${name}`}
+                nProgress={progressPct(p)}
+                sOperationText={progressText(p, speeds[name])}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <ButtonItem layout="below" onClick={() => cancelDownload(name)}>
+                Cancel download
+              </ButtonItem>
+            </PanelSectionRow>
+          </div>
+        ))}
+        {dlError && (
+          <PanelSectionRow>
+            <Field label="Problem">{dlError}</Field>
+          </PanelSectionRow>
+        )}
+      </PanelSection>
+
       <PanelSection title="Transcribe">
         {status && !status.binary && (
           <PanelSectionRow>
@@ -210,63 +264,6 @@ function Panel() {
             <div style={{ whiteSpace: "pre-wrap", textAlign: "right" }}>{result || "-"}</div>
           </Field>
         </PanelSectionRow>
-      </PanelSection>
-
-      <PanelSection title="Choose a model">
-        <PanelSectionRow>
-          <Focusable style={{ display: "flex", alignItems: "center", gap: "8px", width: "100%" }} flow-children="row">
-            <div style={{ flex: 1 }}>
-              <Dropdown
-                rgOptions={models.map((m) => ({
-                  data: m.name,
-                  label: m.installed ? `${m.name}  -  downloaded` : `${m.name}  -  ${sizeLabel(m.size_mb)}`,
-                }))}
-                selectedOption={choice}
-                onChange={(o) => {
-                  setChoice(o.data as string);
-                  setDlError("");
-                }}
-              />
-            </div>
-            {chosen && !chosen.installed && !progress[chosen.name] && (
-              <DialogButton style={{ width: "auto", minWidth: "0", padding: "10px 16px" }}
-                onClick={() => startDownload(chosen)}>
-                {dlError ? "Retry" : "Download"}
-              </DialogButton>
-            )}
-          </Focusable>
-        </PanelSectionRow>
-        {chosen && (
-          <PanelSectionRow>
-            <Field
-              label={chosen.name}
-              description={chosen.description}
-            >
-              {chosen.installed ? "Downloaded" : sizeLabel(chosen.size_mb)}
-            </Field>
-          </PanelSectionRow>
-        )}
-        {downloading.map(([name, p]) => (
-          <div key={name}>
-            <PanelSectionRow>
-              <ProgressBarWithInfo
-                label={`Downloading ${name}`}
-                nProgress={progressPct(p)}
-                sOperationText={progressText(p, speeds[name])}
-              />
-            </PanelSectionRow>
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => cancelDownload(name)}>
-                Cancel download
-              </ButtonItem>
-            </PanelSectionRow>
-          </div>
-        ))}
-        {dlError && (
-          <PanelSectionRow>
-            <Field label="Problem">{dlError}</Field>
-          </PanelSectionRow>
-        )}
       </PanelSection>
 
       <PanelSection title="Updates">
