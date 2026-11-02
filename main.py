@@ -5,9 +5,10 @@
 """Ubermoc Speech - Decky Loader backend.
 
 Records from the microphone and transcribes it to text with a local
-whisper.cpp server. Also contains the GitHub self-updater.
+whisper.cpp server. Also prepares plugin updates for Decky to install.
 """
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -34,6 +35,8 @@ import ubermoc_typing  # noqa: E402
 HOST = "127.0.0.1"
 PORT = 8178
 REPO = "ubermoc/Ubermoc-Speech"
+PLUGIN_NAME = "Ubermoc Speech"
+PLUGIN_FILES = ("plugin.json", "main.py", "dist/index.js")
 RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
 MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
@@ -854,62 +857,53 @@ class Plugin:
             "available": latest["build"] != installed["build"],
         }
 
-    def _download_and_stage(self) -> tuple[str, str]:
+    def _prepare_update(self) -> dict:
+        """Download and check the update, so Decky only ever receives a good zip.
+
+        Decky deletes the old plugin before it checks the hash, so a bad download
+        must never reach it.
+        """
         rel = self._fetch_release()
-        asset = next(a for a in rel["assets"] if a["name"].endswith(".zip"))
+        asset = next((a for a in rel.get("assets", []) if a["name"].endswith(".zip")), None)
+        if asset is None:
+            raise IOError("the latest release has no plugin zip")
         latest = self._parse_release(rel)["version"]
-        work = tempfile.mkdtemp(prefix="ubermoc-update-")
-        zpath = os.path.join(work, "update.zip")
+        os.makedirs(decky.DECKY_PLUGIN_RUNTIME_DIR, exist_ok=True)
+        zpath = os.path.join(decky.DECKY_PLUGIN_RUNTIME_DIR, "Ubermoc-Speech-update.zip")
         req = urllib.request.Request(asset["browser_download_url"], headers={"User-Agent": "ubermoc-speech"})
         with urllib.request.urlopen(req, context=_ssl_context(), timeout=120) as r, open(zpath, "wb") as out:
             shutil.copyfileobj(r, out)
         if os.path.getsize(zpath) != asset["size"]:
             raise IOError("update download incomplete")
-        extract = os.path.join(work, "x")
-        with zipfile.ZipFile(zpath) as z:
-            if z.testzip() is not None:
-                raise IOError("update zip is corrupt")
-            root = os.path.realpath(extract)
-            for name in z.namelist():  # refuse path traversal
-                if not os.path.realpath(os.path.join(root, name)).startswith(root + os.sep):
-                    raise IOError("unsafe path in update zip")
-            z.extractall(extract)
-        top = os.path.join(extract, os.listdir(extract)[0])
-        for need in ("main.py", "plugin.json", os.path.join("dist", "index.js")):
-            if not os.path.exists(os.path.join(top, need)):
-                raise IOError(f"update is missing {need}")
-        return top, latest
-
-    def _apply(self, top: str):
-        """Overwrite plugin files; every file goes via a temp name + atomic rename."""
-        dest_root = decky.DECKY_PLUGIN_DIR
-        backup = os.path.join(os.path.dirname(self._models_dir()), "previous-version")
-        shutil.rmtree(backup, ignore_errors=True)
-        shutil.copytree(dest_root, backup, symlinks=True)  # kept for manual rollback
-        for dirpath, _dirs, files in os.walk(top):
-            rel = os.path.relpath(dirpath, top)
-            target_dir = os.path.join(dest_root, rel) if rel != "." else dest_root
-            os.makedirs(target_dir, exist_ok=True)
-            for fname in files:
-                src = os.path.join(dirpath, fname)
-                dst = os.path.join(target_dir, fname)
-                tmp = dst + ".new"
-                shutil.copy2(src, tmp)
-                os.replace(tmp, dst)
-
-    async def install_update(self) -> dict:
         try:
-            top, latest = await asyncio.get_event_loop().run_in_executor(None, self._download_and_stage)
+            with zipfile.ZipFile(zpath) as z:
+                if z.testzip() is not None:
+                    raise IOError("update zip is corrupt")
+                names = set(z.namelist())
+                plugin_json = z.read(f"{PLUGIN_NAME}/plugin.json")
+        except (zipfile.BadZipFile, KeyError) as e:
+            raise IOError(f"the update isn't a usable plugin zip: {e}") from e
+        for name in names:  # refuse path traversal
+            if ".." in name.split("/") or name.startswith("/"):
+                raise IOError(f"unsafe path in update zip: {name}")
+        for need in PLUGIN_FILES:
+            if f"{PLUGIN_NAME}/{need}" not in names:
+                raise IOError(f"update is missing {need}")
+        try:
+            name = json.loads(plugin_json).get("name")
+        except ValueError:
+            name = None
+        if name != PLUGIN_NAME:
+            raise IOError("the update is for a different plugin")
+        with open(zpath, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        return {"path": zpath, "name": PLUGIN_NAME, "version": latest, "hash": digest}
+
+    async def prepare_update(self) -> dict:
+        try:
+            info = await asyncio.get_event_loop().run_in_executor(None, self._prepare_update)
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"update download failed: {e}")
             return {"ok": False, "error": str(e)}
-        try:
-            await Plugin.stop_server(self)
-            await asyncio.get_event_loop().run_in_executor(None, self._apply, top)
-        except Exception as e:  # noqa: BLE001
-            decky.logger.error(f"update apply failed: {e}")
-            return {"ok": False, "error": str(e)}
-        # No restart: the new files are in place. Decky loads them when the plugin is
-        # reloaded from its plugin list (the way the WoW add-on updater does it).
-        decky.logger.info(f"installed update {latest}; waiting for the plugin to be reloaded")
-        return {"ok": True, "version": latest}
+        # Decky's own installer replaces the files and reloads the plugin.
+        return {"ok": True, **info}

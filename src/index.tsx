@@ -82,7 +82,23 @@ const stopAndTranscribe = callable<
   { ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number }
 >("stop_and_transcribe");
 const checkUpdate = callable<[], UpdateInfo>("check_update");
-const installUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("install_update");
+const prepareUpdate = callable<
+  [],
+  { ok: boolean; path?: string; name?: string; version?: string; hash?: string; error?: string }
+>("prepare_update");
+
+// Decky's own routes. Its UI uses them, but they aren't a documented plugin API,
+// so a missing global must end in a clear error rather than a crash.
+const UPDATE_INSTALL_TYPE = 2;
+function deckyCall(route: string, ...args: unknown[]): Promise<unknown> {
+  const backend = (window as unknown as { DeckyBackend?: { call: (route: string, ...args: unknown[]) => Promise<unknown> } })
+    .DeckyBackend;
+  if (!backend?.call) throw new Error("This version of Decky doesn't offer the plugin installer.");
+  return backend.call(route, ...args);
+}
+// A working update reloads this panel. If it's still here after this long, the
+// prompt was cancelled or the update failed, so offer the restart.
+const RELOAD_WAIT_MS = 45000;
 const getState = callable<[], DictState>("get_state");
 const getActivator = callable<[], ActivatorInfo>("get_activator");
 const startCapture = callable<[], { ok: boolean; error?: string }>("start_capture");
@@ -148,8 +164,6 @@ let lastChoice = "";
 let openGroup: string | null = null;
 // The app being edited in Applications; module level because Decky can re-create the panel.
 let editedApp = "";
-// An update was installed; the new version loads when the plugin is reloaded from Decky.
-let updateInstalled = "";
 
 // ---------- installed games and non-Steam apps ----------
 // Steam's own definition (its interface source): an installed Steam game is a Game whose
@@ -314,7 +328,8 @@ function Panel() {
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
-  const [updDone, setUpdDone] = useState(updateInstalled);
+  const [offerRestart, setOfferRestart] = useState(false);
+  const updTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const wasDownloading = useRef(false);
   const speedRef = useRef<Record<string, Speed>>({});
 
@@ -359,6 +374,7 @@ function Panel() {
     return () => {
       clearInterval(t);
       clearInterval(st);
+      clearTimeout(updTimer.current);
     };
   }, []);
 
@@ -946,10 +962,10 @@ function Panel() {
 
       <PanelSection title="Updates">
         <PanelSectionRow>
-          <Field label="Installed version">v{upd?.installed.version ?? "..."}</Field>
+          <Field label="Current version" bottomSeparator="none">v{upd?.installed.version ?? "..."}</Field>
         </PanelSectionRow>
         <PanelSectionRow>
-          <Field label="Latest version">
+          <Field label="Latest version" bottomSeparator="none">
             {upd?.latest
               ? `v${upd.latest.version}${
                   upd.available && upd.latest.version === upd.installed.version ? " (rebuilt)" : ""
@@ -962,33 +978,53 @@ function Panel() {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            disabled={updBusy || !!updDone}
-            description={updDone ? `v${updDone} installed. Open Decky's plugin list (the gear icon) and choose Reload for Ubermoc Speech to start using it.` : updMsg || (upd?.error ?? (upd?.available ? "A newer version is available" : "You are up to date"))}
+            disabled={updBusy || !upd?.available}
+            description={updMsg || upd?.error}
             onClick={async () => {
               setUpdBusy(true);
               try {
                 if (upd?.available) {
-                  setUpdMsg("Downloading and installing...");
-                  const r = await installUpdate();
-                  if (r.ok) {
-                    updateInstalled = r.version ?? "new";
-                    setUpdDone(updateInstalled);
-                    setUpdMsg("");
-                  } else {
-                    setUpdMsg(`Update failed: ${r.error ?? "unknown error"}`);
-                  }
-                } else {
-                  setUpdMsg("");
-                  setUpd(await checkUpdate());
+                  setUpdMsg("Downloading...");
+                  const p = await prepareUpdate();
+                  if (!p.ok) throw new Error(p.error ?? "unknown error");
+                  setUpdMsg("Installing...");
+                  await deckyCall(
+                    "utilities/install_plugin", `file://${p.path}`, p.name, p.version, p.hash, UPDATE_INSTALL_TYPE,
+                  );
+                  // A working update reloads this panel; stay busy until then.
+                  updTimer.current = setTimeout(() => {
+                    setUpdBusy(false);
+                    setOfferRestart(true);
+                  }, RELOAD_WAIT_MS);
+                  return;
                 }
-              } finally {
-                setUpdBusy(false);
+              } catch (err) {
+                setUpdMsg(`Update failed: ${err instanceof Error ? err.message : String(err)}`);
+                setOfferRestart(true);
               }
+              setUpdBusy(false);
             }}
           >
-            {updDone ? "Installed - reload the plugin" : upd?.available ? "Install update" : "Check for updates"}
+            {updBusy ? "Updating..." : upd?.available ? "Update" : "Up to date"}
           </ButtonItem>
         </PanelSectionRow>
+        {offerRestart && (
+          <PanelSectionRow>
+            <ButtonItem
+              layout="below"
+              description="Didn't update? This restarts Decky and Steam's interface."
+              onClick={async () => {
+                try {
+                  await deckyCall("updater/do_restart");
+                } catch (err) {
+                  setUpdMsg(err instanceof Error ? err.message : String(err));
+                }
+              }}
+            >
+              Restart Decky Loader
+            </ButtonItem>
+          </PanelSectionRow>
+        )}
       </PanelSection>
     </>
   );
