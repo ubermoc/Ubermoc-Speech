@@ -13,6 +13,14 @@ section always visible at the bottom:
 - **Testing**: record a test, see the text, test typing
 - **Updates** (always shown): installs the latest GitHub release
 
+## Works together
+Three projects made to be used together, so you can play World of Warcraft from the couch with only a controller:
+
+- **[Ubermoc UI](https://github.com/ubermoc/Ubermoc-UI)** ([CurseForge](https://www.curseforge.com/wow/addons/ubermoc-ui)): the addon. It makes the game playable without a mouse or keyboard.
+- **[Ubermoc Warcraft Mod Updater](https://github.com/ubermoc/Ubermoc-Warcraft-Mod-Updater)**: a Decky plugin that installs Ubermoc UI the first time you open Midnight or Forever, and keeps it (and your other GitHub addons) updated from Gaming Mode.
+
+Together: the Updater keeps the addon current, Ubermoc UI lets you play, and Ubermoc Speech does the typing.
+
 ## Install
 ```
 curl -L -o us.zip https://github.com/ubermoc/Ubermoc-Speech/releases/latest/download/Ubermoc-Speech.zip
