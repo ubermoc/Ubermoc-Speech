@@ -150,6 +150,8 @@ Ubermoc Speech is free. If you'd like to say thanks, donations are optional and 
 - [Ko-fi](https://ko-fi.com/ubermoc)
 - [Buy Me a Coffee](https://buymeacoffee.com/Ubermoc)
 
+Made by Marcos ([Ubermoc](https://github.com/ubermoc)).
+
 ## Licence
 Copyright (c) 2026 ubermoc. All rights reserved. This is **not** open source: you may install
 and use the official release, and read the code, but copying, modifying, redistributing, or
