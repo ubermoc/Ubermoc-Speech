@@ -143,6 +143,13 @@ header by `scripts/gen_codes.py`.
 
 Earlier experiments are in the git history and on the `experimental-v0.01` branch.
 
+## Support the project
+Ubermoc Speech is free. If you'd like to say thanks, donations are optional and always appreciated:
+
+- [GitHub Sponsors](https://github.com/sponsors/ubermoc)
+- [Ko-fi](https://ko-fi.com/ubermoc)
+- [Buy Me a Coffee](https://buymeacoffee.com/Ubermoc)
+
 ## Licence
 Copyright (c) 2026 ubermoc. All rights reserved. This is **not** open source: you may install
 and use the official release, and read the code, but copying, modifying, redistributing, or
