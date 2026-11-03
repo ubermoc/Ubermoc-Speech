@@ -192,6 +192,14 @@ class Plugin:
             return chosen[name]
         return name.startswith("large")
 
+    @staticmethod
+    def _vad_threshold(name: str) -> str:
+        """How sure the voice detector must be that it hears speech. Lower keeps quieter
+        speech but lets more noise through. The large models make stray words out of
+        noise, so they get the stricter value; the others' sound labels are already
+        removed before typing, so they can afford the more sensitive one."""
+        return "0.09" if name.startswith("large") else "0.08"
+
     # ---------- models ----------
     async def list_models(self) -> dict:
         return {
@@ -327,7 +335,7 @@ class Plugin:
         # keep the edges of short utterances.
         vad = os.path.join(os.path.dirname(binary), VAD_MODEL)
         if os.path.exists(vad) and self._vad_on(name):
-            cmd += ["--vad", "-vm", vad, "-vp", "300", "-vspd", "120", "-vt", "0.20"]
+            cmd += ["--vad", "-vm", vad, "-vp", "300", "-vspd", "120", "-vt", Plugin._vad_threshold(name)]
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
         log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "whisper-server.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
