@@ -39,6 +39,10 @@ PLUGIN_FILES = ("plugin.json", "main.py", "dist/index.js")
 RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
 MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+# Models that are not in the whisper.cpp repo. The file is still saved as ggml-<name>.bin.
+MODEL_URLS = {
+    "distil-large-v3": "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
+}
 DEFAULT_MODEL = "base.en"
 # name -> (approx size in MB, description). The file is ggml-<name>.bin.
 MODELS = {
@@ -49,6 +53,7 @@ MODELS = {
     "small.en-q5_1": (181, "English only. Compressed small."),
     "medium.en": (1533, "English only. Very accurate but slow on handhelds."),
     "medium.en-q5_0": (514, "English only. Compressed medium."),
+    "distil-large-v3": (1449, "English only. Distilled large-v3: very accurate and faster than the full large models."),
     "tiny": (75, "All languages. Fastest, least accurate."),
     "base": (142, "All languages. Fast."),
     "small": (466, "All languages. Accurate."),
@@ -206,7 +211,7 @@ class Plugin:
         if not self._model_ok(name):
             dest = self._model_path(name)
             tmp = dest + ".part"
-            url = f"{MODEL_BASE_URL}/ggml-{name}.bin"
+            url = MODEL_URLS.get(name, f"{MODEL_BASE_URL}/ggml-{name}.bin")
             self.cancel_flags.discard(name)
             self.download_progress[name] = {"done": 0, "total": MODELS[name][0] * 1024 * 1024}
 
