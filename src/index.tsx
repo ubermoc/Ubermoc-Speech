@@ -12,6 +12,7 @@ import {
   PanelSectionRow,
   ProgressBarWithInfo,
   Router,
+  ToggleField,
   definePlugin,
 } from "@decky/ui";
 import { Component, ReactNode, useEffect, useRef, useState } from "react";
@@ -28,7 +29,7 @@ void PROVENANCE;
 interface Status { binary: boolean; server: boolean; recording: boolean }
 type Phase = "idle" | "starting" | "recording" | "transcribing" | "typing";
 interface ModelInfo { name: string; size_mb: number; description: string; installed: boolean }
-interface ModelList { selected: string; models: ModelInfo[] }
+interface ModelList { selected: string; vad: boolean; models: ModelInfo[] }
 interface DlProgress { done: number; total: number }
 interface TypedInfo {
   status: "typed" | "panel" | "empty" | "error";
@@ -71,6 +72,7 @@ interface UpdateInfo {
 // ---------- backend ----------
 const getStatus = callable<[], Status>("status");
 const listModels = callable<[], ModelList>("list_models");
+const setVad = callable<[on: boolean], { ok: boolean; error?: string }>("set_vad");
 const setModel = callable<[string], { ok: boolean; error?: string }>("set_model");
 const downloadModel = callable<[string], { ok: boolean; error?: string }>("download_model");
 const getProgress = callable<[], Record<string, DlProgress>>("get_download_progress");
@@ -346,6 +348,7 @@ function Panel() {
   const [upd, setUpd] = useState<UpdateInfo | null>(null);
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
+  const [vadOn, setVadOn] = useState(false);
   const [offerRestart, setOfferRestart] = useState(false);
   const updTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const wasDownloading = useRef(false);
@@ -355,6 +358,7 @@ function Panel() {
     const m = await listModels();
     setModels(m.models);
     setActive(m.selected);
+    setVadOn(m.vad);
     setChoice((c) => c || lastChoice || m.selected || m.models[0]?.name || "");
     setStatus(await getStatus());
   };
@@ -852,6 +856,20 @@ function Panel() {
         ) : (
           <PanelSectionRow>
             <Field label="No model yet" description="Download one under Choose a model, then select it here" />
+          </PanelSectionRow>
+        )}
+        {downloaded.length > 0 && ready && (
+          <PanelSectionRow>
+            <ToggleField
+              label="Voice detector"
+              description="Skips noise and silence so they aren't typed as stray words. Turn it off if it ever cuts off a quiet word. Remembered for each model."
+              checked={vadOn}
+              onChange={async (on: boolean) => {
+                setVadOn(on);
+                await setVad(on);
+                await refresh();
+              }}
+            />
           </PanelSectionRow>
         )}
       </PanelSection>

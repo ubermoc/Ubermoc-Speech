@@ -183,10 +183,20 @@ class Plugin:
         except OSError:
             return 1000
 
+    def _vad_on(self, name: str) -> bool:
+        """Whether the voice detector is used with this model. A choice the user made
+        wins; otherwise it is on for the large models (which turn noise into stray
+        words) and off for the rest."""
+        chosen = self._load_settings().get("vad")
+        if isinstance(chosen, dict) and isinstance(chosen.get(name), bool):
+            return chosen[name]
+        return name.startswith("large")
+
     # ---------- models ----------
     async def list_models(self) -> dict:
         return {
             "selected": self._selected(),
+            "vad": self._vad_on(self._selected()),
             "models": [
                 {"name": n, "size_mb": mb, "description": d, "installed": self._model_ok(n)}
                 for n, (mb, d) in MODELS.items()
@@ -199,6 +209,18 @@ class Plugin:
         self._save_selected(name)
         await Plugin.stop_server(self)  # restarts with the new model on next use
         return {"ok": True}
+
+    async def set_vad(self, on: bool) -> dict:
+        """Turn the voice detector on or off for the current model."""
+        name = self._selected()
+        if not name:
+            return {"ok": False, "error": "no model selected"}
+        chosen = self._load_settings().get("vad")
+        chosen = dict(chosen) if isinstance(chosen, dict) else {}
+        chosen[name] = bool(on)
+        self._save_settings(vad=chosen)
+        await Plugin.stop_server(self)  # restarts with the new setting on next use
+        return {"ok": True, "vad": bool(on)}
 
     def _save_selected(self, name: str):
         self._save_settings(model=name)
@@ -300,12 +322,12 @@ class Plugin:
         env = {**os.environ, "LD_LIBRARY_PATH": os.path.dirname(binary)}
         cmd = [binary, "-m", self._model_path(name), "--host", HOST, "--port", str(PORT),
                "-t", str(min(4, os.cpu_count() or 4)), "-nt"]
-        # Only audio the voice detector hears as speech reaches the model, so noise and
-        # silence are not turned into stray words. The padding and low minimum keep the
-        # edges of short utterances.
+        # With the voice detector on, only audio it hears as speech reaches the model, so
+        # noise and silence are not turned into stray words. The padding and low minimum
+        # keep the edges of short utterances.
         vad = os.path.join(os.path.dirname(binary), VAD_MODEL)
-        if os.path.exists(vad):
-            cmd += ["--vad", "-vm", vad, "-vp", "300", "-vspd", "120", "-vt", "0.40"]
+        if os.path.exists(vad) and self._vad_on(name):
+            cmd += ["--vad", "-vm", vad, "-vp", "300", "-vspd", "120", "-vt", "0.20"]
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
         log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "whisper-server.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
