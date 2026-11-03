@@ -184,13 +184,12 @@ class Plugin:
             return 1000
 
     def _vad_on(self, name: str) -> bool:
-        """Whether the voice detector is used with this model. A choice the user made
-        wins; otherwise it is on for the large models (which turn noise into stray
-        words) and off for the rest."""
+        """Whether the voice detector is used with this model. It is on unless the user
+        turned it off for that model."""
         chosen = self._load_settings().get("vad")
         if isinstance(chosen, dict) and isinstance(chosen.get(name), bool):
             return chosen[name]
-        return name.startswith("large")
+        return True
 
     @staticmethod
     def _vad_threshold(name: str) -> str:
@@ -198,7 +197,7 @@ class Plugin:
         speech but lets more noise through. The large models make stray words out of
         noise, so they get the stricter value; the others' sound labels are already
         removed before typing, so they can afford the more sensitive one."""
-        return "0.09" if name.startswith("large") else "0.08"
+        return "0.10" if name.startswith("large") else "0.08"
 
     # ---------- models ----------
     async def list_models(self) -> dict:
