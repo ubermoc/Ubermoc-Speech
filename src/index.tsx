@@ -1000,24 +1000,33 @@ function Panel() {
             description={updMsg || upd?.error}
             onClick={async () => {
               setUpdBusy(true);
+              let installed = "";
               try {
                 if (upd?.available) {
                   setUpdMsg("Downloading and installing...");
                   const r = await installUpdate();
                   if (!r.ok) throw new Error(r.error ?? "unknown error");
-                  setUpdMsg(`Installed v${r.version}. Reloading...`);
+                  installed = r.version ?? "";
+                  setUpdMsg(`Installed v${installed}. Reloading...`);
                   // Restarts the plugin's backend and loads its new panel.
                   await reloadAndShowPanel("Ubermoc Speech");
-                  // A working update reloads this panel; stay busy until then.
+                  // A working update replaces this panel; stay busy until then.
                   updTimer.current = setTimeout(() => {
                     setUpdBusy(false);
+                    setUpdMsg(`Installed v${installed}, but the panel didn't reload.`);
                     setOfferRestart(true);
                   }, RELOAD_WAIT_MS);
                   return;
                 }
               } catch (err) {
-                setUpdMsg(`Update failed: ${err instanceof Error ? err.message : String(err)}`);
-                setOfferRestart(true);
+                const why = err instanceof Error ? err.message : String(err);
+                if (installed) {
+                  // The files are updated; only the reload failed, which a restart fixes.
+                  setUpdMsg(`Installed v${installed}, but it didn't reload: ${why}`);
+                  setOfferRestart(true);
+                } else {
+                  setUpdMsg(`Update failed: ${why}`);
+                }
               }
               setUpdBusy(false);
             }}
