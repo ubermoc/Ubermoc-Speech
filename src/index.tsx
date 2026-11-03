@@ -95,6 +95,28 @@ function deckyCall(route: string, ...args: unknown[]): Promise<unknown> {
 // A working update reloads this panel. If it's still here after this long, the
 // prompt was cancelled or the update failed, so offer the restart.
 const RELOAD_WAIT_MS = 45000;
+
+interface DeckyPlugin { name: string }
+interface DeckyState { publicState(): { plugins: DeckyPlugin[] }; setActivePlugin(name: string): void }
+
+// Decky keeps showing the old copy of an open panel after its plugin reloads, so
+// once the new copy is loaded, open it. Returns false if Decky's state isn't there.
+async function reloadAndShowPanel(name: string): Promise<boolean> {
+  const state = (window as unknown as { DeckyPluginLoader?: { deckyState?: DeckyState } }).DeckyPluginLoader?.deckyState;
+  const find = () => state?.publicState().plugins.find((p) => p.name === name);
+  const old = find();
+  await deckyCall("loader/reload_plugin", name);
+  if (!state) return false;
+  for (let i = 0; i < 40; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    const now = find();
+    if (now && now !== old) {
+      state.setActivePlugin(name);
+      return true;
+    }
+  }
+  return false;
+}
 const getState = callable<[], DictState>("get_state");
 const getActivator = callable<[], ActivatorInfo>("get_activator");
 const startCapture = callable<[], { ok: boolean; error?: string }>("start_capture");
@@ -985,7 +1007,7 @@ function Panel() {
                   if (!r.ok) throw new Error(r.error ?? "unknown error");
                   setUpdMsg(`Installed v${r.version}. Reloading...`);
                   // Restarts the plugin's backend and loads its new panel.
-                  await deckyCall("loader/reload_plugin", "Ubermoc Speech");
+                  await reloadAndShowPanel("Ubermoc Speech");
                   // A working update reloads this panel; stay busy until then.
                   updTimer.current = setTimeout(() => {
                     setUpdBusy(false);
