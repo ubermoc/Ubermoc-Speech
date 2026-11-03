@@ -34,6 +34,7 @@ import ubermoc_typing  # noqa: E402
 HOST = "127.0.0.1"
 PORT = 8178
 REPO = "ubermoc/Ubermoc-Speech"
+VAD_MODEL = "ggml-silero-v6.2.0.bin"
 PLUGIN_NAME = "Ubermoc Speech"
 PLUGIN_FILES = ("plugin.json", "main.py", "dist/index.js")
 RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
@@ -299,6 +300,12 @@ class Plugin:
         env = {**os.environ, "LD_LIBRARY_PATH": os.path.dirname(binary)}
         cmd = [binary, "-m", self._model_path(name), "--host", HOST, "--port", str(PORT),
                "-t", str(min(4, os.cpu_count() or 4)), "-nt"]
+        # Only audio the voice detector hears as speech reaches the model, so noise and
+        # silence are not turned into stray words. The padding and low minimum keep the
+        # edges of short utterances.
+        vad = os.path.join(os.path.dirname(binary), VAD_MODEL)
+        if os.path.exists(vad):
+            cmd += ["--vad", "-vm", vad, "-vp", "300", "-vspd", "120", "-vt", "0.40"]
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
         log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "whisper-server.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)

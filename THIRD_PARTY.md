@@ -20,3 +20,8 @@ Source: https://gcc.gnu.org/
 
 ## Interface libraries
 React, @decky/ui, @decky/api and react-icons, under their own licences.
+
+## Silero VAD (`bin/ggml-silero-v6.2.0.bin`)
+MIT License. Copyright (c) 2020-present Silero Team. Converted to ggml format by the ggml
+authors for whisper.cpp. Used to skip noise and silence before transcription.
+Source: https://github.com/snakers4/silero-vad and https://huggingface.co/ggml-org/whisper-vad
