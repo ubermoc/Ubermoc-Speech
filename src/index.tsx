@@ -82,14 +82,10 @@ const stopAndTranscribe = callable<
   { ok: boolean; text?: string; error?: string; wait_s?: number; transcribe_s?: number }
 >("stop_and_transcribe");
 const checkUpdate = callable<[], UpdateInfo>("check_update");
-const prepareUpdate = callable<
-  [],
-  { ok: boolean; path?: string; name?: string; version?: string; hash?: string; error?: string }
->("prepare_update");
+const installUpdate = callable<[], { ok: boolean; version?: string; error?: string }>("install_update");
 
 // Decky's own routes. Its UI uses them, but they aren't a documented plugin API,
 // so a missing global must end in a clear error rather than a crash.
-const UPDATE_INSTALL_TYPE = 2;
 function deckyCall(route: string, ...args: unknown[]): Promise<unknown> {
   const backend = (window as unknown as { DeckyBackend?: { call: (route: string, ...args: unknown[]) => Promise<unknown> } })
     .DeckyBackend;
@@ -984,13 +980,12 @@ function Panel() {
               setUpdBusy(true);
               try {
                 if (upd?.available) {
-                  setUpdMsg("Downloading...");
-                  const p = await prepareUpdate();
-                  if (!p.ok) throw new Error(p.error ?? "unknown error");
-                  setUpdMsg("Installing...");
-                  await deckyCall(
-                    "utilities/install_plugin", `file://${p.path}`, p.name, p.version, p.hash, UPDATE_INSTALL_TYPE,
-                  );
+                  setUpdMsg("Downloading and installing...");
+                  const r = await installUpdate();
+                  if (!r.ok) throw new Error(r.error ?? "unknown error");
+                  setUpdMsg(`Installed v${r.version}. Reloading...`);
+                  // Restarts the plugin's backend and loads its new panel.
+                  await deckyCall("loader/reload_plugin", "Ubermoc Speech");
                   // A working update reloads this panel; stay busy until then.
                   updTimer.current = setTimeout(() => {
                     setUpdBusy(false);
