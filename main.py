@@ -414,6 +414,9 @@ class Plugin:
         Plugin._buzz(self, "start")
         return {"ok": True, "ready_s": round(time.time() - t0, 2)}
 
+    def _rumble_level(self) -> int:
+        return ubermoc_rumble.level_of(self._load_settings().get("rumble_level"))
+
     def _buzz(self, which: str):
         """Feel that recording started / stopped (every controller that can rumble; can be turned off)."""
         if self._load_settings().get("rumble") is False:
@@ -421,18 +424,24 @@ class Plugin:
         if self.rumbler is None:
             self.rumbler = ubermoc_rumble.Rumbler()
         try:
-            self.rumbler.play(which)
+            self.rumbler.play(which, self._rumble_level())
         except Exception as e:  # noqa: BLE001 - a missing buzz must never break dictation
             decky.logger.warning(f"rumble failed: {e}")
 
     async def get_rumble(self) -> dict:
-        return {"on": self._load_settings().get("rumble") is not False}
+        return {"on": self._load_settings().get("rumble") is not False, "level": self._rumble_level()}
 
     async def set_rumble(self, on: bool) -> dict:
         self._save_settings(rumble=bool(on))
         if on:
             Plugin._buzz(self, "start")      # a sample, so the toggle can be felt
-        return {"ok": True, "on": bool(on)}
+        return {"ok": True, "on": bool(on), "level": self._rumble_level()}
+
+    async def set_rumble_level(self, level: int) -> dict:
+        level = ubermoc_rumble.level_of(level)
+        self._save_settings(rumble_level=level)
+        Plugin._buzz(self, "start")          # a sample at the new strength
+        return {"ok": True, "level": level}
 
     def _stop_recorder(self):
         proc = self.record_proc

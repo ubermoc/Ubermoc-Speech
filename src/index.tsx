@@ -12,6 +12,7 @@ import {
   PanelSectionRow,
   ProgressBarWithInfo,
   Router,
+  SliderField,
   ToggleField,
   definePlugin,
 } from "@decky/ui";
@@ -126,7 +127,8 @@ const captureStatus = callable<[], CaptureStatus>("capture_status");
 const cancelCapture = callable<[], boolean>("cancel_capture");
 const clearActivator = callable<[], { ok: boolean }>("clear_activator");
 const setUiPad = callable<[string[]], boolean>("set_ui_pad");
-const getRumble = callable<[], { on: boolean }>("get_rumble");
+const getRumble = callable<[], { on: boolean; level: number }>("get_rumble");
+const setRumbleLevel = callable<[number], { ok: boolean; level: number }>("set_rumble_level");
 const setRumble = callable<[boolean], { ok: boolean; on: boolean }>("set_rumble");
 const getTyping = callable<[], TypingInfo>("get_typing");
 const setTyping = callable<[string, string, string], TypingInfo>("set_typing");
@@ -352,6 +354,7 @@ function Panel() {
   const [updBusy, setUpdBusy] = useState(false);
   const [vadOn, setVadOn] = useState(false);
   const [rumbleOn, setRumbleOn] = useState(true);
+  const [rumbleLevel, setRumbleLevelState] = useState(3);
   const [offerRestart, setOfferRestart] = useState(false);
   const updTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const wasDownloading = useRef(false);
@@ -372,7 +375,10 @@ function Panel() {
     void checkUpdate().then(setUpd);
     void getActivator().then(setAct);
     void getTyping().then(setTypingInfo);
-    void getRumble().then((r) => setRumbleOn(r.on));
+    void getRumble().then((r) => {
+      setRumbleOn(r.on);
+      setRumbleLevelState(r.level);
+    });
     const st = setInterval(async () => setDict(await getState()), 400);
     const t = setInterval(async () => {
       const p = await getProgress();
@@ -707,6 +713,26 @@ function Panel() {
             }}
           />
         </PanelSectionRow>
+        {rumbleOn && (
+          <PanelSectionRow>
+            <SliderField
+              label="Intensity"
+              description="Release to feel a sample."
+              value={rumbleLevel}
+              min={1}
+              max={5}
+              step={1}
+              notchCount={5}
+              notchLabels={[1, 2, 3, 4, 5].map((n) => ({ notchIndex: n - 1, label: String(n), value: n }))}
+              notchTicksVisible
+              showValue={false}
+              onChange={async (n: number) => {
+                setRumbleLevelState(n);
+                await setRumbleLevel(n);
+              }}
+            />
+          </PanelSectionRow>
+        )}
       </PanelSection>
 
       <PanelSection title="Around the typed text">

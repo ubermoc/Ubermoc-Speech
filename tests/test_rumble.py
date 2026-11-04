@@ -49,6 +49,28 @@ class Pads(unittest.TestCase):
         self.assertEqual(ubermoc_rumble.EVIOCRMFF, 0x40044581)
 
 
+class Levels(unittest.TestCase):
+    def test_five_steps_each_stronger(self):
+        self.assertEqual(sorted(ubermoc_rumble.LEVELS), [1, 2, 3, 4, 5])
+        values = [ubermoc_rumble.LEVELS[n] for n in range(1, 6)]
+        self.assertEqual(values, sorted(set(values)))
+
+    def test_bad_settings_fall_back(self):
+        for bad in (None, 0, 6, "3", 2.5, True, [3]):
+            self.assertEqual(ubermoc_rumble.level_of(bad), ubermoc_rumble.DEFAULT_LEVEL)
+        self.assertEqual(ubermoc_rumble.level_of(5), 5)
+
+    def test_level_picks_strength(self):
+        seen = []
+        r = ubermoc_rumble.Rumbler(lambda: ["event5"])
+        r._run = lambda which, nodes, strength: seen.append(strength)
+        r.play("start", 5)
+        r.play("start", 1)
+        import time
+        time.sleep(0.05)
+        self.assertEqual(sorted(seen), [ubermoc_rumble.LEVELS[1], ubermoc_rumble.LEVELS[5]])
+
+
 class Play(unittest.TestCase):
     def test_nothing_to_buzz(self):
         self.assertFalse(ubermoc_rumble.Rumbler(lambda: []).play("start"))
@@ -58,12 +80,12 @@ class Play(unittest.TestCase):
         log = []
         r = ubermoc_rumble.Rumbler(lambda: ["event5"], sleep=lambda s: None)
         r._open = lambda node: 99
-        r._start = lambda fd, ms: log.append("on") or 7
+        r._start = lambda fd, ms, strength: log.append("on") or 7
         r._erase = lambda fd, effect_id: log.append("off")
         orig = os.close
         os.close = lambda fd: None if fd == 99 else orig(fd)
         try:
-            r._run("stop", ["event5"])
+            r._run("stop", ["event5"], 0x2000)
         finally:
             os.close = orig
         self.assertEqual(log, ["on", "off", "on", "off"])
