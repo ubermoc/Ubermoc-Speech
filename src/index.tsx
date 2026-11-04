@@ -126,6 +126,8 @@ const captureStatus = callable<[], CaptureStatus>("capture_status");
 const cancelCapture = callable<[], boolean>("cancel_capture");
 const clearActivator = callable<[], { ok: boolean }>("clear_activator");
 const setUiPad = callable<[string[]], boolean>("set_ui_pad");
+const getRumble = callable<[], { on: boolean }>("get_rumble");
+const setRumble = callable<[boolean], { ok: boolean; on: boolean }>("set_rumble");
 const getTyping = callable<[], TypingInfo>("get_typing");
 const setTyping = callable<[string, string, string], TypingInfo>("set_typing");
 const typeTest = callable<[number], { ok: boolean }>("type_test");
@@ -349,6 +351,7 @@ function Panel() {
   const [updMsg, setUpdMsg] = useState("");
   const [updBusy, setUpdBusy] = useState(false);
   const [vadOn, setVadOn] = useState(false);
+  const [rumbleOn, setRumbleOn] = useState(true);
   const [offerRestart, setOfferRestart] = useState(false);
   const updTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const wasDownloading = useRef(false);
@@ -369,6 +372,7 @@ function Panel() {
     void checkUpdate().then(setUpd);
     void getActivator().then(setAct);
     void getTyping().then(setTypingInfo);
+    void getRumble().then((r) => setRumbleOn(r.on));
     const st = setInterval(async () => setDict(await getState()), 400);
     const t = setInterval(async () => {
       const p = await getProgress();
@@ -688,6 +692,20 @@ function Panel() {
           >
             {watchText(act?.watching)}
           </Field>
+        </PanelSectionRow>
+      </PanelSection>
+
+      <PanelSection title="Feedback">
+        <PanelSectionRow>
+          <ToggleField
+            label="Rumble"
+            description="Any controller that can rumble. One short buzz when recording starts, two when it stops, so you know it is listening."
+            checked={rumbleOn}
+            onChange={async (on: boolean) => {
+              setRumbleOn(on);
+              await setRumble(on);
+            }}
+          />
         </PanelSectionRow>
       </PanelSection>
 

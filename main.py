@@ -28,6 +28,7 @@ import decky  # provided by Decky Loader
 # Decky already puts <plugin>/py_modules on sys.path; do it explicitly as well.
 sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 import ubermoc_input  # noqa: E402
+import ubermoc_rumble  # noqa: E402
 import ubermoc_settings  # noqa: E402
 import ubermoc_typing  # noqa: E402
 
@@ -100,6 +101,7 @@ class Plugin:
     hub = None
     keyboard = None                # the virtual keyboard, created on first use
     presser = None                 # presses keys / mouse buttons / controller buttons
+    rumbler = None                 # buzzes the controllers when recording starts / stops
     panel_seen: float = 0.0        # last time the panel polled (it is open if recent)
     type_acks: dict = {}
     last_typing_test: dict | None = None
@@ -409,7 +411,28 @@ class Plugin:
                 break
             await asyncio.sleep(0.02)
         self.phase = "recording"
+        Plugin._buzz(self, "start")
         return {"ok": True, "ready_s": round(time.time() - t0, 2)}
+
+    def _buzz(self, which: str):
+        """Feel that recording started / stopped (every controller that can rumble; can be turned off)."""
+        if self._load_settings().get("rumble") is False:
+            return
+        if self.rumbler is None:
+            self.rumbler = ubermoc_rumble.Rumbler()
+        try:
+            self.rumbler.play(which)
+        except Exception as e:  # noqa: BLE001 - a missing buzz must never break dictation
+            decky.logger.warning(f"rumble failed: {e}")
+
+    async def get_rumble(self) -> dict:
+        return {"on": self._load_settings().get("rumble") is not False}
+
+    async def set_rumble(self, on: bool) -> dict:
+        self._save_settings(rumble=bool(on))
+        if on:
+            Plugin._buzz(self, "start")      # a sample, so the toggle can be felt
+        return {"ok": True, "on": bool(on)}
 
     def _stop_recorder(self):
         proc = self.record_proc
@@ -445,6 +468,7 @@ class Plugin:
     async def _finish_recording(self) -> dict:
         path = self.record_path
         self._stop_recorder()
+        Plugin._buzz(self, "stop")       # after the recorder ends, so the buzz is not recorded
         if not path or not os.path.exists(path) or os.path.getsize(path) < 2000:
             return {"ok": False, "error": "no audio captured"}
         t0 = time.time()
@@ -764,6 +788,7 @@ class Plugin:
     async def _discard_recording(self):
         path = self.record_path
         self._stop_recorder()
+        Plugin._buzz(self, "stop")
         if path:
             try:
                 os.remove(path)
