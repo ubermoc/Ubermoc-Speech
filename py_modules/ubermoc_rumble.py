@@ -31,14 +31,16 @@ PATTERNS = {
     "start": [(0.07, 0.0)],
     "stop": [(0.06, 0.07), (0.06, 0.0)],
 }
-# The five intensity steps (1..5) as motor strength out of 0xFFFF. Roughly doubling each step;
-# the top one is the strength v0.37 shipped with, which felt strong, so it is now the ceiling.
-LEVELS = {1: 0x0800, 2: 0x1000, 3: 0x2000, 4: 0x4000, 5: 0x6000}
+# The ten intensity steps (1..10) as motor strength out of 0xFFFF, each about 1.5x the one
+# before. The top one is the strength v0.37 shipped with, which felt far too strong, so it is
+# the ceiling; step 1 is barely a tick.
+MAX_LEVEL = 10
+LEVELS = {n: round(0x0200 * (0x6000 / 0x0200) ** ((n - 1) / (MAX_LEVEL - 1))) for n in range(1, MAX_LEVEL + 1)}
 DEFAULT_LEVEL = 3
 
 
 def level_of(value) -> int:
-    """A stored setting as a step 1..5; anything else is the default."""
+    """A stored setting as a step 1..10; anything else is the default."""
     return value if isinstance(value, int) and not isinstance(value, bool) and value in LEVELS else DEFAULT_LEVEL
 
 

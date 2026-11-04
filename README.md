@@ -7,7 +7,7 @@ server.
 
 The panel opens as four collapsible groups (one open at a time), with the update
 section always visible at the bottom:
-- **Global options**: the activator, rumble (one buzz when recording starts, two when it stops, on any controller that can rumble; with a five-step intensity slider; can be turned off), what is pressed around the typed text, and Typing settings (spoken symbols, method, speed)
+- **Global options**: the activator, rumble (one buzz when recording starts, two when it stops, on any controller that can rumble; with a ten-step intensity slider; can be turned off), what is pressed around the typed text, and Typing settings (spoken symbols, method, speed)
 - **Applications**: different before / after inputs for specific Steam and non-Steam apps
 - **Models**: Current model, Choose a model (download / delete)
 - **Testing**: record a test, see the text, test typing

@@ -50,25 +50,26 @@ class Pads(unittest.TestCase):
 
 
 class Levels(unittest.TestCase):
-    def test_five_steps_each_stronger(self):
-        self.assertEqual(sorted(ubermoc_rumble.LEVELS), [1, 2, 3, 4, 5])
-        values = [ubermoc_rumble.LEVELS[n] for n in range(1, 6)]
+    def test_ten_steps_each_stronger(self):
+        self.assertEqual(sorted(ubermoc_rumble.LEVELS), list(range(1, 11)))
+        values = [ubermoc_rumble.LEVELS[n] for n in range(1, 11)]
+        self.assertEqual((values[0], values[-1]), (0x0200, 0x6000))
         self.assertEqual(values, sorted(set(values)))
 
     def test_bad_settings_fall_back(self):
-        for bad in (None, 0, 6, "3", 2.5, True, [3]):
+        for bad in (None, 0, 11, "3", 2.5, True, [3]):
             self.assertEqual(ubermoc_rumble.level_of(bad), ubermoc_rumble.DEFAULT_LEVEL)
-        self.assertEqual(ubermoc_rumble.level_of(5), 5)
+        self.assertEqual(ubermoc_rumble.level_of(10), 10)
 
     def test_level_picks_strength(self):
         seen = []
         r = ubermoc_rumble.Rumbler(lambda: ["event5"])
         r._run = lambda which, nodes, strength: seen.append(strength)
-        r.play("start", 5)
+        r.play("start", 10)
         r.play("start", 1)
         import time
         time.sleep(0.05)
-        self.assertEqual(sorted(seen), [ubermoc_rumble.LEVELS[1], ubermoc_rumble.LEVELS[5]])
+        self.assertEqual(sorted(seen), [ubermoc_rumble.LEVELS[1], ubermoc_rumble.LEVELS[10]])
 
 
 class Play(unittest.TestCase):

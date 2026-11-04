@@ -720,10 +720,10 @@ function Panel() {
               description="Release to feel a sample."
               value={rumbleLevel}
               min={1}
-              max={5}
+              max={10}
               step={1}
-              notchCount={5}
-              notchLabels={[1, 2, 3, 4, 5].map((n) => ({ notchIndex: n - 1, label: String(n), value: n }))}
+              notchCount={10}
+              notchLabels={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => ({ notchIndex: n - 1, label: String(n), value: n }))}
               notchTicksVisible
               showValue={false}
               onChange={async (n: number) => {
