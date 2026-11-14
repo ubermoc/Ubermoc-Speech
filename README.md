@@ -30,35 +30,40 @@ sudo systemctl restart plugin_loader
 After that, use the Update button in the panel. It swaps the new files in without restarting Decky or Steam; then open Decky's plugin list (gear icon) and choose Reload for Ubermoc Speech to start using the new version.
 
 ## Models
-Pick a model, press Download, then select it under Current model. Models are kept in
-`~/.local/share/ubermoc-speech/models` and never re-downloaded. Only a downloaded model
-can be current.
+Two models are offered. Pick one, press Download, then select it under Current model. Models are kept in
+`~/.local/share/ubermoc-speech/models` and never re-downloaded. Only a downloaded model can be current.
 
-Each model's description gives its languages, accuracy, speed and memory in one line, so you
-can choose without guessing. Names starting with `parakeet-` use the Parakeet engine; every
-other name uses Whisper:
+| Model | Engine | Download | Memory | Best for |
+|---|---|---|---|---|
+| `parakeet-tdt-0.6b-v2` (recommended) | NVIDIA Parakeet via [parakeet.cpp](https://github.com/mudler/parakeet.cpp) | 862 MB | about 1.3 GB | fewest mistakes, also with background noise |
+| `small.en` (lighter) | OpenAI Whisper via [whisper.cpp](https://github.com/ggml-org/whisper.cpp) | 466 MB | about 0.9 GB | very fast, good in quiet rooms, has the voice detector switch |
 
-- **Languages**: names ending in `.en` (and the distilled models) are English only and a little
-  more accurate for English at the same size; the others handle many languages (about 99).
-- **Accuracy** is a relative tier (basic, fair, good, very good, near-best, best), typical for
-  that model family. It is not measured on your microphone, so a noisy room can change the order.
-- **Speed** is relative to the large model, from OpenAI's published table (for example turbo is
-  about 8x faster). A slower processor makes every model slower.
-- **Memory** for the standard models is whisper.cpp's published figure; "est." marks an estimate
-  scaled from it for compressed (`q5`, `q8`) and distilled models.
-- Compressed (`q5_0`, `q5_1`, `q8_0`) models are a fraction of the download and use less memory
-  at a small cost in accuracy; `q8_0` is closer to the original than `q5_0`.
-- The voice detector (Silero) stays a separate switch for Whisper models; it trims silence and
-  background noise before the model hears the recording. Parakeet models have no such switch:
-  they return empty text for silence by themselves, so the switch is off and does nothing for them.
+Both are English only. They were chosen from a comparison of ten English models on one speaker's recordings
+(52 clips: sentences, spelled letters and digits, numbers like fifteen/fifty, sound-alike words such as
+two/to/too; 16 of the clips with background noise):
 
-**Parakeet models** (English `parakeet-110m` and `parakeet-tdt-0.6b-v2`, 25 European languages
-`parakeet-tdt-0.6b-v3`) are NVIDIA's speech models, converted to 8-bit GGUF files by the
-parakeet.cpp project and downloaded from Hugging Face when you press Download. They run on the
-GPU through Vulkan when one is available. In published English tests Parakeet is rated above
-Whisper large-v3 and is much faster; on your own microphone and in noise that can differ, so
-try both and keep the one that types what you said. The models are licensed CC-BY-4.0 by NVIDIA;
-see `THIRD_PARTY.md`.
+| Words wrong | `parakeet-tdt-0.6b-v2` | `small.en` |
+|---|---|---|
+| Sentences, quiet / noisy | 4.3% / 6.4% | 5.5% / 11.5% |
+| Spelled letters and digits, quiet / noisy | 0.0% / 4.2% | 0.0% / 4.2% |
+| Numbers like fifteen/fifty | 10.0% | 10.0% |
+| Sound-alike words | 0.0% | 0.0% |
+| Time per phrase on a desktop GPU | about 0.24 s | about 0.06 s |
+
+This is **one speaker with one microphone**, and one clip moves a percentage by several points, so treat the
+numbers as a guide: a different voice, microphone or room can change the order. Names from games ("Orgrimmar",
+"Jaina") were the most common mistake for every model, and numbers spoken in pairs ("eighteen, eighty") were
+sometimes written as years.
+
+- **Voice detector**: the Silero detector stays a separate switch for Whisper models; it trims silence and
+  background noise before the model hears the recording. Parakeet has no such switch: it returns empty text for
+  silence by itself, so the switch is off and does nothing for it.
+- **Parakeet** runs on the GPU through Vulkan when one is available. NVIDIA's models are licensed CC-BY-4.0;
+  see `THIRD_PARTY.md`.
+- **Older models**: versions before 0.41 offered 23 models. They are no longer offered for download, but a model
+  that is already on your computer keeps working, stays selected, and is listed (marked as an older option) so you
+  can delete it. If the model you had selected is gone, the plugin falls back to a recommended model that is
+  downloaded; if none is, press Download on one.
 
 ## Activator (hold to talk)
 Hold the activator to record, release to transcribe. It can be keyboard keys, mouse

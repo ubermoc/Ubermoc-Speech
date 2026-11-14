@@ -18,7 +18,6 @@ MODEL_URLS = {
     "distil-large-v3": "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
     "distil-large-v3.5": "https://huggingface.co/distil-whisper/distil-large-v3.5-ggml/resolve/main/ggml-model.bin",
 }
-DEFAULT_MODEL = "base.en"
 # name -> (approx size in MB, description). The file is ggml-<name>.bin.
 # Every description follows one pattern: languages, accuracy, speed, memory. Where the numbers come from:
 #   memory  - whisper.cpp README "Memory usage" table (tiny ~0.3 GB, base ~0.4, small ~0.9, medium ~2.1, large ~3.9); "est." = scaled from it
@@ -28,7 +27,7 @@ DEFAULT_MODEL = "base.en"
 #   accuracy- a relative tier (basic < fair < good < very good < near-best < best), typical for the model family,
 #             NOT measured on your microphone. Distil-Whisper figures are from its model cards.
 # Nothing here was measured on a Steam Deck or on your hardware: a slower processor makes every model slower.
-MODELS = {
+_V040_MODELS = {
     # ---- English only (a little more accurate for English at the same size; smaller models gain most)
     "tiny.en": (75, "English only. Basic accuracy. Fastest (about 10x the large model). Memory about 0.3 GB. Fine for short, clear commands."),
     "base.en": (142, "English only. Fair accuracy. Very fast (about 7x large). Memory about 0.4 GB. Good for short phrases."),
@@ -56,6 +55,37 @@ MODELS = {
     "parakeet-tdt-0.6b-v2": (862, "English only. Parakeet (NVIDIA): near-best accuracy; rated above Whisper large-v3 for English in published tests. Memory about 1 GB (est.). No voice detector."),
     "parakeet-tdt-0.6b-v3": (897, "25 European languages. Parakeet (NVIDIA): near-best accuracy for them. Memory about 1 GB (est.). No voice detector."),
 }
+
+# The two models offered since v0.41. Chosen from a comparison of ten English models on one speaker's recordings
+# (52 clips: sentences, spelled letters and digits, teen/ten numbers, sound-alike words; half the clips with background noise).
+# The numbers below are those measurements; they come from ONE speaker and ONE microphone, so a different voice can differ.
+MODELS = {
+    "parakeet-tdt-0.6b-v2": (862, "English only. RECOMMENDED. Fewest mistakes in our test (one English speaker, noisy microphone): about 4% of words wrong, 6% with background noise; spelled letters and sound-alike words right in quiet. Weaker on numbers like fifteen/fifty (10% wrong). Memory about 1.3 GB, about a quarter of a second per phrase on a desktop GPU. Has no voice detector switch."),
+    "small.en": (466, "English only. LIGHTER OPTION. Almost as accurate in quiet (about 5% of words wrong; spelled letters right) but more mistakes with background noise (about 12%), and numbers like fifteen/fifty 10% wrong. Memory about 0.9 GB and very fast (a fraction of a second per phrase). Same test: one English speaker, noisy microphone."),
+}
+DEFAULT_MODEL = "parakeet-tdt-0.6b-v2"
+# Everything offered before v0.41. No longer offered for download, but a copy already on this computer keeps working
+# and is listed so it can be deleted.
+LEGACY_MODELS = {n: (mb, "Older option, no longer offered for download. " + d) for n, (mb, d) in _V040_MODELS.items() if n not in MODELS}
+KNOWN = {**LEGACY_MODELS, **MODELS}          # every model this plugin can run
+
+
+def visible_models(is_installed):
+    """What the panel lists: the offered models, plus any older model that is installed (so it can still be used or deleted)."""
+    out = [{"name": n, "size_mb": mb, "description": d, "installed": bool(is_installed(n))} for n, (mb, d) in MODELS.items()]
+    out += [{"name": n, "size_mb": mb, "description": d, "installed": True} for n, (mb, d) in LEGACY_MODELS.items() if is_installed(n)]
+    return out
+
+
+def choose_model(saved, is_installed):
+    """The model to use: the saved choice if it is known and installed; otherwise the first offered model that is installed; otherwise none."""
+    if saved in KNOWN and is_installed(saved):
+        return saved
+    for n in MODELS:
+        if is_installed(n):
+            return n
+    return ""
+
 
 # Parakeet model name -> file in the GGUF repo (8-bit versions). Saved as parakeet-<file>.
 PARAKEET_BASE_URL = "https://huggingface.co/mudler/parakeet-cpp-gguf/resolve/main"
