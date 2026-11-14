@@ -44,24 +44,41 @@ MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 # Models that are not in the whisper.cpp repo. The file is still saved as ggml-<name>.bin.
 MODEL_URLS = {
     "distil-large-v3": "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
+    "distil-large-v3.5": "https://huggingface.co/distil-whisper/distil-large-v3.5-ggml/resolve/main/ggml-model.bin",
 }
 DEFAULT_MODEL = "base.en"
 # name -> (approx size in MB, description). The file is ggml-<name>.bin.
+# Every description follows one pattern: languages, accuracy, speed, memory. Where the numbers come from:
+#   memory  - whisper.cpp README "Memory usage" table (tiny ~0.3 GB, base ~0.4, small ~0.9, medium ~2.1, large ~3.9); "est." = scaled from it
+#             for compressed (q5 / q8) and distilled models, which the table does not list.
+#   speed   - OpenAI Whisper README, speed relative to the large model (tiny ~10x, base ~7x, small ~4x, medium ~2x, turbo ~8x);
+#             distil-large-v3 "6.3x faster than large-v3" is from its model card.
+#   accuracy- a relative tier (basic < fair < good < very good < near-best < best), typical for the model family,
+#             NOT measured on your microphone. Distil-Whisper figures are from its model cards.
+# Nothing here was measured on a Steam Deck or on your hardware: a slower processor makes every model slower.
 MODELS = {
-    "tiny.en": (75, "English only. Fastest, least accurate."),
-    "base.en": (142, "English only. Fast, good for short phrases."),
-    "base.en-q5_1": (57, "English only. Compressed base, smaller and a bit faster."),
-    "small.en": (466, "English only. Accurate, a good balance."),
-    "small.en-q5_1": (181, "English only. Compressed small."),
-    "medium.en": (1533, "English only. Very accurate but slow on handhelds."),
-    "medium.en-q5_0": (514, "English only. Compressed medium."),
-    "distil-large-v3": (1449, "English only. Distilled large-v3: very accurate and faster than the full large models."),
-    "tiny": (75, "All languages. Fastest, least accurate."),
-    "base": (142, "All languages. Fast."),
-    "small": (466, "All languages. Accurate."),
-    "medium": (1533, "All languages. Very accurate but slow."),
-    "large-v3-turbo-q5_0": (547, "All languages. Near-best accuracy, compressed."),
-    "large-v3-turbo": (1624, "All languages. Best accuracy, heaviest."),
+    # ---- English only (a little more accurate for English at the same size; smaller models gain most)
+    "tiny.en": (75, "English only. Basic accuracy. Fastest (about 10x the large model). Memory about 0.3 GB. Fine for short, clear commands."),
+    "base.en": (142, "English only. Fair accuracy. Very fast (about 7x large). Memory about 0.4 GB. Good for short phrases."),
+    "base.en-q5_1": (57, "English only. Compressed base: smaller download and less memory, accuracy close to base.en."),
+    "small.en": (466, "English only. Good accuracy. Fast (about 4x large). Memory about 0.9 GB. A good balance on most computers."),
+    "small.en-q5_1": (181, "English only. Compressed small: about 60% smaller, accuracy close to small.en. Memory about 0.5 GB (est.)."),
+    "medium.en": (1533, "English only. Very good accuracy. Moderate speed (about 2x large). Memory about 2.1 GB. Slow on weak processors."),
+    "medium.en-q5_0": (514, "English only. Compressed medium: a third of the size, accuracy close to medium.en. Memory about 0.8 GB (est.)."),
+    "distil-large-v3": (1449, "English only. Near-large accuracy (within about 1% of large-v3's error on long audio), about 6x faster. Memory about 2 GB (est.)."),
+    "distil-large-v3.5": (1449, "English only. Newest distilled model: near-large accuracy, a little lower error than turbo on short clips (per its card). Memory about 2 GB (est.)."),
+    # ---- Many languages (about 99)
+    "tiny": (75, "Many languages. Basic accuracy. Fastest (about 10x large). Memory about 0.3 GB."),
+    "base": (142, "Many languages. Fair accuracy. Very fast (about 7x large). Memory about 0.4 GB."),
+    "small": (466, "Many languages. Good accuracy. Fast (about 4x large). Memory about 0.9 GB."),
+    "small-q5_1": (181, "Many languages. Compressed small: about 60% smaller, accuracy close to small. Memory about 0.5 GB (est.)."),
+    "medium": (1533, "Many languages. Very good accuracy. Moderate speed (about 2x large). Memory about 2.1 GB."),
+    "medium-q5_0": (514, "Many languages. Compressed medium: a third of the size, accuracy close to medium. Memory about 0.8 GB (est.)."),
+    "large-v3-turbo-q5_0": (547, "Many languages. Near-best accuracy, heavily compressed turbo (about 8x large). Memory about 1 GB (est.). May lose a little accuracy against the original."),
+    "large-v3-turbo-q8_0": (834, "Many languages. Near-best accuracy, lightly compressed turbo (about 8x large): bigger and closer to the original than q5_0. Memory about 1.3 GB (est.)."),
+    "large-v3-turbo": (1624, "Many languages. Near-best accuracy, the original turbo (about 8x large). Memory about 2 GB (est.)."),
+    "large-v3-q5_0": (1031, "Many languages. Best accuracy, compressed. Slower than turbo (large speed). Memory about 2 GB (est.)."),
+    "large-v3": (2952, "Many languages. Best accuracy, the original. The slowest and heaviest. Memory about 3.9 GB."),
 }
 
 TYPE_TEST_TEXT = "Ubermoc Speech test"

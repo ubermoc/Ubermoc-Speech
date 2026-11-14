@@ -34,6 +34,22 @@ Pick a model, press Download, then select it under Current model. Models are kep
 `~/.local/share/ubermoc-speech/models` and never re-downloaded. Only a downloaded model
 can be current.
 
+Each model's description gives its languages, accuracy, speed and memory in one line, so you
+can choose without guessing:
+
+- **Languages**: names ending in `.en` (and the distilled models) are English only and a little
+  more accurate for English at the same size; the others handle many languages (about 99).
+- **Accuracy** is a relative tier (basic, fair, good, very good, near-best, best), typical for
+  that model family. It is not measured on your microphone, so a noisy room can change the order.
+- **Speed** is relative to the large model, from OpenAI's published table (for example turbo is
+  about 8x faster). A slower processor makes every model slower.
+- **Memory** for the standard models is whisper.cpp's published figure; "est." marks an estimate
+  scaled from it for compressed (`q5`, `q8`) and distilled models.
+- Compressed (`q5_0`, `q5_1`, `q8_0`) models are a fraction of the download and use less memory
+  at a small cost in accuracy; `q8_0` is closer to the original than `q5_0`.
+- The voice detector (Silero) stays a separate switch; it trims silence and background noise
+  before the model hears the recording.
+
 ## Activator (hold to talk)
 Hold the activator to record, release to transcribe. It can be keyboard keys, mouse
 buttons or controller buttons, alone or in any combination (`Left Ctrl + F9`,
