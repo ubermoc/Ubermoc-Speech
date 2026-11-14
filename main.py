@@ -41,8 +41,7 @@ PLUGIN_NAME = "Ubermoc Speech"
 PLUGIN_FILES = ("plugin.json", "main.py", "dist/index.js")
 RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
-MODELS = ubermoc_models.MODELS          # the models offered for download: name -> (approx size in MB, description); see py_modules/ubermoc_models.py
-KNOWN = ubermoc_models.KNOWN            # every model that can run (the offered ones plus older ones already on the computer)
+MODELS = ubermoc_models.MODELS          # name -> (approx size in MB, description); see py_modules/ubermoc_models.py
 DEFAULT_MODEL = ubermoc_models.DEFAULT_MODEL
 
 TYPE_TEST_TEXT = "Ubermoc Speech test"
@@ -131,9 +130,9 @@ class Plugin:
 
     def _model_ok(self, name: str) -> bool:
         path = self._model_path(name)
-        if name not in KNOWN or not os.path.exists(path):
+        if name not in MODELS or not os.path.exists(path):
             return False
-        return os.path.getsize(path) > KNOWN[name][0] * 1024 * 1024 * 0.6
+        return os.path.getsize(path) > MODELS[name][0] * 1024 * 1024 * 0.6
 
     def _store(self):
         if getattr(self, "_settings_store", None) is None:
@@ -190,7 +189,7 @@ class Plugin:
         }
 
     async def set_model(self, name: str) -> dict:
-        if name not in KNOWN or not self._model_ok(name):
+        if name not in MODELS or not self._model_ok(name):
             return {"ok": False, "error": "model is not downloaded"}
         self._save_selected(name)
         await Plugin.stop_server(self)  # restarts with the new model on next use
@@ -261,7 +260,7 @@ class Plugin:
         return {"ok": False, "error": "downloaded file looks incomplete"}
 
     async def delete_model(self, name: str) -> dict:
-        if name not in KNOWN:
+        if name not in MODELS:
             return {"ok": False, "error": "unknown model"}
         if name in self.download_progress:
             return {"ok": False, "error": "it is still downloading"}

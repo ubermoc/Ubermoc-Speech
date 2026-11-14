@@ -30,40 +30,58 @@ sudo systemctl restart plugin_loader
 After that, use the Update button in the panel. It swaps the new files in without restarting Decky or Steam; then open Decky's plugin list (gear icon) and choose Reload for Ubermoc Speech to start using the new version.
 
 ## Models
-Two models are offered. Pick one, press Download, then select it under Current model. Models are kept in
+Every model is available. Pick one, press Download, then select it under Current model. Models are kept in
 `~/.local/share/ubermoc-speech/models` and never re-downloaded. Only a downloaded model can be current.
+The panel lists the two recommended models first, then the rest. Each description gives the languages, a
+relative accuracy tier, speed and memory in one line, and for the ten models we tested it adds our measured
+results.
+
+**Recommended** (from a comparison of ten English models on one speaker's recordings):
 
 | Model | Engine | Download | Memory | Best for |
 |---|---|---|---|---|
 | `parakeet-tdt-0.6b-v2` (recommended) | NVIDIA Parakeet via [parakeet.cpp](https://github.com/mudler/parakeet.cpp) | 862 MB | about 1.3 GB | fewest mistakes, also with background noise |
-| `small.en` (lighter) | OpenAI Whisper via [whisper.cpp](https://github.com/ggml-org/whisper.cpp) | 466 MB | about 0.9 GB | very fast, good in quiet rooms, has the voice detector switch |
+| `small.en` (lighter option) | OpenAI Whisper via [whisper.cpp](https://github.com/ggml-org/whisper.cpp) | 466 MB | about 0.9 GB | very fast, good in quiet rooms, has the voice detector switch |
 
-Both are English only. They were chosen from a comparison of ten English models on one speaker's recordings
-(52 clips: sentences, spelled letters and digits, numbers like fifteen/fifty, sound-alike words such as
-two/to/too; 16 of the clips with background noise):
+**Our voice test**: 52 clips from one English speaker with one noisy microphone (sentences, spelled letters and
+digits, numbers like fifteen/fifty, sound-alike words such as two/to/too; 16 clips with background noise).
+Share wrong, lower is better:
 
-| Words wrong | `parakeet-tdt-0.6b-v2` | `small.en` |
-|---|---|---|
-| Sentences, quiet / noisy | 4.3% / 6.4% | 5.5% / 11.5% |
-| Spelled letters and digits, quiet / noisy | 0.0% / 4.2% | 0.0% / 4.2% |
-| Numbers like fifteen/fifty | 10.0% | 10.0% |
-| Sound-alike words | 0.0% | 0.0% |
-| Time per phrase on a desktop GPU | about 0.24 s | about 0.06 s |
+| Model | Sentences quiet / noisy | Spelled letters and digits quiet / noisy | Numbers | Sound-alikes | Time per phrase* |
+|---|---|---|---|---|---|
+| `parakeet-tdt-0.6b-v2` | 4.3% / 6.4% | 0.0% / 4.2% | 10.0% | 0.0% | 0.24 s |
+| `small.en` | 5.5% / 11.5% | 0.0% / 4.2% | 10.0% | 0.0% | 0.06 s |
+| `medium.en` | 9.8% / 9.0% | 0.0% / 4.2% | 10.0% | 0.0% | 0.14 s |
+| `large-v3-turbo` and `large-v3-turbo-q8_0` | 5.5% / 9.0% | 8.2% / 4.2% | 5.6% | 3.2% | 0.10 s / 0.15 s |
+| `large-v3` | 5.5% / 7.7% | 8.2% / 16.7% | 0.0% | 0.0% | 0.36 s |
+| `parakeet-110m` | 8.6% / 7.7% | 14.8% / 20.8% | 2.8% | 3.2% | 0.05 s |
+| `base.en` | 5.5% / 7.7% | 13.1% / 20.8% | 10.0% | 12.9% | 0.04 s |
+| `tiny.en` | 7.4% / 10.3% | 3.3% / 25.0% | 66.7% | 6.5% | 0.02 s |
+| `distil-large-v3.5` | 6.7% / 7.7% | 44.3% / 70.8% | 35.0% | 3.2% | 0.10 s |
 
-This is **one speaker with one microphone**, and one clip moves a percentage by several points, so treat the
-numbers as a guide: a different voice, microphone or room can change the order. Names from games ("Orgrimmar",
-"Jaina") were the most common mistake for every model, and numbers spoken in pairs ("eighteen, eighty") were
-sometimes written as years.
+\* on a desktop GPU; a slower processor makes every model slower. This is **one speaker with one microphone**, and
+one clip moves a percentage by several points, so treat the numbers as a guide: a different voice, microphone or
+room can change the order. Game names ("Orgrimmar", "Jaina") were the most common mistake for every model, and
+numbers spoken in pairs ("eighteen, eighty") were sometimes written as years. The other models (all-language
+versions, compressed `q5` versions and the rest) were not part of the test and say so.
 
+- **Languages**: names ending in `.en` (and the distilled models) are English only and a little more accurate for
+  English at the same size; the others handle many languages (about 99). `parakeet-tdt-0.6b-v3` covers 25
+  European languages.
+- **Accuracy** in the descriptions is a relative tier (basic, fair, good, very good, near-best, best), typical for
+  that model family, plus the measured results where we have them.
+- **Speed** is relative to the large model, from OpenAI's published table (for example turbo is about 8x faster).
+- **Memory** for the standard models is whisper.cpp's published figure; "est." marks an estimate scaled from it
+  for compressed (`q5`, `q8`) and distilled models.
+- Compressed (`q5_0`, `q5_1`, `q8_0`) models are a fraction of the download and use less memory at a small cost
+  in accuracy; `q8_0` is closer to the original than `q5_0`.
 - **Voice detector**: the Silero detector stays a separate switch for Whisper models; it trims silence and
-  background noise before the model hears the recording. Parakeet has no such switch: it returns empty text for
-  silence by itself, so the switch is off and does nothing for it.
-- **Parakeet** runs on the GPU through Vulkan when one is available. NVIDIA's models are licensed CC-BY-4.0;
-  see `THIRD_PARTY.md`.
-- **Older models**: versions before 0.41 offered 23 models. They are no longer offered for download, but a model
-  that is already on your computer keeps working, stays selected, and is listed (marked as an older option) so you
-  can delete it. If the model you had selected is gone, the plugin falls back to a recommended model that is
-  downloaded; if none is, press Download on one.
+  background noise before the model hears the recording. Parakeet models have no such switch: they return empty
+  text for silence by themselves, so the switch is off and does nothing for them.
+- **Parakeet** (names starting `parakeet-`) runs on the GPU through Vulkan when one is available. NVIDIA's models
+  are licensed CC-BY-4.0; see `THIRD_PARTY.md`.
+- If the model you selected is no longer on the computer, the plugin falls back to a downloaded model (the
+  recommended ones first); if none is downloaded, press Download on one.
 
 ## Activator (hold to talk)
 Hold the activator to record, release to transcribe. It can be keyboard keys, mouse

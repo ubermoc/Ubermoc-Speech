@@ -27,7 +27,7 @@ MODEL_URLS = {
 #   accuracy- a relative tier (basic < fair < good < very good < near-best < best), typical for the model family,
 #             NOT measured on your microphone. Distil-Whisper figures are from its model cards.
 # Nothing here was measured on a Steam Deck or on your hardware: a slower processor makes every model slower.
-_V040_MODELS = {
+_BASE_MODELS = {
     # ---- English only (a little more accurate for English at the same size; smaller models gain most)
     "tiny.en": (75, "English only. Basic accuracy. Fastest (about 10x the large model). Memory about 0.3 GB. Fine for short, clear commands."),
     "base.en": (142, "English only. Fair accuracy. Very fast (about 7x large). Memory about 0.4 GB. Good for short phrases."),
@@ -56,30 +56,58 @@ _V040_MODELS = {
     "parakeet-tdt-0.6b-v3": (897, "25 European languages. Parakeet (NVIDIA): near-best accuracy for them. Memory about 1 GB (est.). No voice detector."),
 }
 
-# The two models offered since v0.41. Chosen from a comparison of ten English models on one speaker's recordings
-# (52 clips: sentences, spelled letters and digits, teen/ten numbers, sound-alike words; half the clips with background noise).
-# The numbers below are those measurements; they come from ONE speaker and ONE microphone, so a different voice can differ.
-MODELS = {
-    "parakeet-tdt-0.6b-v2": (862, "English only. RECOMMENDED. Fewest mistakes in our test (one English speaker, noisy microphone): about 4% of words wrong, 6% with background noise; spelled letters and sound-alike words right in quiet. Weaker on numbers like fifteen/fifty (10% wrong). Memory about 1.3 GB, about a quarter of a second per phrase on a desktop GPU. Has no voice detector switch."),
-    "small.en": (466, "English only. LIGHTER OPTION. Almost as accurate in quiet (about 5% of words wrong; spelled letters right) but more mistakes with background noise (about 12%), and numbers like fifteen/fifty 10% wrong. Memory about 0.9 GB and very fast (a fraction of a second per phrase). Same test: one English speaker, noisy microphone."),
+# What we measured. A comparison of ten English models on ONE speaker's recordings with ONE noisy microphone:
+# 52 clips (normal sentences, spelled letters and digits, numbers like fifteen/fifty, sound-alike words such as two/to/too),
+# 16 of them with background noise. Values: % wrong for (sentences quiet, sentences noisy, spelled quiet, spelled noisy, numbers, sound-alikes).
+# A different voice, microphone or room can change the order; one clip moves a figure by several points.
+MEASURED = {
+    "parakeet-tdt-0.6b-v2": (4.3, 6.4, 0.0, 4.2, 10.0, 0.0),
+    "small.en": (5.5, 11.5, 0.0, 4.2, 10.0, 0.0),
+    "medium.en": (9.8, 9.0, 0.0, 4.2, 10.0, 0.0),
+    "large-v3-turbo": (5.5, 9.0, 8.2, 4.2, 5.6, 3.2),
+    "large-v3-turbo-q8_0": (5.5, 9.0, 8.2, 4.2, 5.6, 3.2),
+    "large-v3": (5.5, 7.7, 8.2, 16.7, 0.0, 0.0),
+    "parakeet-110m": (8.6, 7.7, 14.8, 20.8, 2.8, 3.2),
+    "base.en": (5.5, 7.7, 13.1, 20.8, 10.0, 12.9),
+    "tiny.en": (7.4, 10.3, 3.3, 25.0, 66.7, 6.5),
+    "distil-large-v3.5": (6.7, 7.7, 44.3, 70.8, 35.0, 3.2),
 }
-DEFAULT_MODEL = "parakeet-tdt-0.6b-v2"
-# Everything offered before v0.41. No longer offered for download, but a copy already on this computer keeps working
-# and is listed so it can be deleted.
-LEGACY_MODELS = {n: (mb, "Older option, no longer offered for download. " + d) for n, (mb, d) in _V040_MODELS.items() if n not in MODELS}
-KNOWN = {**LEGACY_MODELS, **MODELS}          # every model this plugin can run
+# The panel shows the recommended models first.
+RECOMMENDED = {
+    "parakeet-tdt-0.6b-v2": "RECOMMENDED. Fewest mistakes in our test, also with background noise.",
+    "small.en": "LIGHTER OPTION. Almost as accurate in quiet, very fast, smallest download of the accurate models.",
+}
+
+
+def _measured(name):
+    m = MEASURED.get(name)
+    if not m:
+        return " Not part of our voice test."
+    sq, sn, pq, pn, nu, ho = (f"{v:.0f}" if v >= 10 or v == int(v) else f"{v:.1f}" for v in m)
+    return (f" Our voice test (one English speaker, noisy microphone), share wrong: sentences {sq}% quiet / {sn}% noisy, "
+            f"spelled letters and digits {pq}% / {pn}%, numbers like fifteen/fifty {nu}%, sound-alike words {ho}%.")
+
+
+def _describe(name, base):
+    if name in RECOMMENDED:
+        base = base.replace("English only. ", "English only. " + RECOMMENDED[name] + " ", 1)
+    return base + _measured(name)
+
+
+_ORDER = list(RECOMMENDED) + [n for n in _BASE_MODELS if n not in RECOMMENDED]
+MODELS = {n: (_BASE_MODELS[n][0], _describe(n, _BASE_MODELS[n][1])) for n in _ORDER}
+DEFAULT_MODEL = "base.en"
 
 
 def visible_models(is_installed):
-    """What the panel lists: the offered models, plus any older model that is installed (so it can still be used or deleted)."""
-    out = [{"name": n, "size_mb": mb, "description": d, "installed": bool(is_installed(n))} for n, (mb, d) in MODELS.items()]
-    out += [{"name": n, "size_mb": mb, "description": d, "installed": True} for n, (mb, d) in LEGACY_MODELS.items() if is_installed(n)]
-    return out
+    """What the panel lists: every model, with whether it is on this computer."""
+    return [{"name": n, "size_mb": mb, "description": d, "installed": bool(is_installed(n))} for n, (mb, d) in MODELS.items()]
 
 
 def choose_model(saved, is_installed):
-    """The model to use: the saved choice if it is known and installed; otherwise the first offered model that is installed; otherwise none."""
-    if saved in KNOWN and is_installed(saved):
+    """The model to use: the saved choice if it is known and installed; otherwise the first listed model that is installed
+    (the recommended ones come first); otherwise none."""
+    if saved in MODELS and is_installed(saved):
         return saved
     for n in MODELS:
         if is_installed(n):
