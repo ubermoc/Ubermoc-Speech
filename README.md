@@ -2,8 +2,8 @@
 
 A [Decky Loader](https://decky.xyz) plugin: hold an activator, speak, let go, and the
 transcribed text is typed into whatever has focus, in gaming mode and desktop mode.
-Transcription is local, using a [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
-server.
+Transcription is local, with two engines to choose from: [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
+(OpenAI Whisper models) and [parakeet.cpp](https://github.com/mudler/parakeet.cpp) (NVIDIA Parakeet models).
 
 The panel opens as four collapsible groups (one open at a time), with the update
 section always visible at the bottom:
@@ -35,7 +35,8 @@ Pick a model, press Download, then select it under Current model. Models are kep
 can be current.
 
 Each model's description gives its languages, accuracy, speed and memory in one line, so you
-can choose without guessing:
+can choose without guessing. Names starting with `parakeet-` use the Parakeet engine; every
+other name uses Whisper:
 
 - **Languages**: names ending in `.en` (and the distilled models) are English only and a little
   more accurate for English at the same size; the others handle many languages (about 99).
@@ -47,8 +48,17 @@ can choose without guessing:
   scaled from it for compressed (`q5`, `q8`) and distilled models.
 - Compressed (`q5_0`, `q5_1`, `q8_0`) models are a fraction of the download and use less memory
   at a small cost in accuracy; `q8_0` is closer to the original than `q5_0`.
-- The voice detector (Silero) stays a separate switch; it trims silence and background noise
-  before the model hears the recording.
+- The voice detector (Silero) stays a separate switch for Whisper models; it trims silence and
+  background noise before the model hears the recording. Parakeet models have no such switch:
+  they return empty text for silence by themselves, so the switch is off and does nothing for them.
+
+**Parakeet models** (English `parakeet-110m` and `parakeet-tdt-0.6b-v2`, 25 European languages
+`parakeet-tdt-0.6b-v3`) are NVIDIA's speech models, converted to 8-bit GGUF files by the
+parakeet.cpp project and downloaded from Hugging Face when you press Download. They run on the
+GPU through Vulkan when one is available. In published English tests Parakeet is rated above
+Whisper large-v3 and is much faster; on your own microphone and in noise that can differ, so
+try both and keep the one that types what you said. The models are licensed CC-BY-4.0 by NVIDIA;
+see `THIRD_PARTY.md`.
 
 ## Activator (hold to talk)
 Hold the activator to record, release to transcribe. It can be keyboard keys, mouse
@@ -152,7 +162,10 @@ file is kept as `settings.json.corrupt`. The plugin log records each save and wh
 
 ## Build
 `./scripts/package.sh` builds `out/Ubermoc Speech.zip`. `bin/whisper-server` (Vulkan,
-glibc >= 2.38) is committed; rebuild it with `scripts/build-whisper-server.sh`. Every push to
+glibc >= 2.38) is committed; rebuild it with `scripts/build-whisper-server.sh`.
+`bin/parakeet-server` (Vulkan, glibc >= 2.34) is committed too; it comes from a pinned parakeet.cpp
+release, checked against a recorded SHA-256, by `scripts/fetch-parakeet-server.sh`.
+`scripts/integration_smoke.py` runs the plugin's own code against the real servers and models. Every push to
 `main` publishes a release via GitHub Actions. `VERSION` is the human-readable version.
 Tests: `python3 -m unittest discover -s tests -v`. Key names are generated from the kernel
 header by `scripts/gen_codes.py`.

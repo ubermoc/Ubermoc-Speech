@@ -996,7 +996,7 @@ function Panel() {
       <PanelSection title="Transcribe">
         {status && !status.binary && (
           <PanelSectionRow>
-            <Field label="Problem">whisper-server is missing - reinstall the plugin</Field>
+            <Field label="Problem">The speech engine program is missing - reinstall the plugin</Field>
           </PanelSectionRow>
         )}
         <PanelSectionRow>

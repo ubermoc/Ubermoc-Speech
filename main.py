@@ -5,7 +5,7 @@
 """Ubermoc Speech - Decky Loader backend.
 
 Records from the microphone and transcribes it to text with a local
-whisper.cpp server. Also contains the GitHub self-updater.
+speech server (whisper.cpp, or NVIDIA Parakeet through parakeet.cpp). Also contains the GitHub self-updater.
 """
 import asyncio
 import json
@@ -28,6 +28,7 @@ import decky  # provided by Decky Loader
 # Decky already puts <plugin>/py_modules on sys.path; do it explicitly as well.
 sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 import ubermoc_input  # noqa: E402
+import ubermoc_models  # noqa: E402
 import ubermoc_rumble  # noqa: E402
 import ubermoc_settings  # noqa: E402
 import ubermoc_typing  # noqa: E402
@@ -40,46 +41,8 @@ PLUGIN_NAME = "Ubermoc Speech"
 PLUGIN_FILES = ("plugin.json", "main.py", "dist/index.js")
 RELEASE_API = f"https://api.github.com/repos/{REPO}/releases/latest"
 
-MODEL_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
-# Models that are not in the whisper.cpp repo. The file is still saved as ggml-<name>.bin.
-MODEL_URLS = {
-    "distil-large-v3": "https://huggingface.co/distil-whisper/distil-large-v3-ggml/resolve/main/ggml-distil-large-v3.bin",
-    "distil-large-v3.5": "https://huggingface.co/distil-whisper/distil-large-v3.5-ggml/resolve/main/ggml-model.bin",
-}
-DEFAULT_MODEL = "base.en"
-# name -> (approx size in MB, description). The file is ggml-<name>.bin.
-# Every description follows one pattern: languages, accuracy, speed, memory. Where the numbers come from:
-#   memory  - whisper.cpp README "Memory usage" table (tiny ~0.3 GB, base ~0.4, small ~0.9, medium ~2.1, large ~3.9); "est." = scaled from it
-#             for compressed (q5 / q8) and distilled models, which the table does not list.
-#   speed   - OpenAI Whisper README, speed relative to the large model (tiny ~10x, base ~7x, small ~4x, medium ~2x, turbo ~8x);
-#             distil-large-v3 "6.3x faster than large-v3" is from its model card.
-#   accuracy- a relative tier (basic < fair < good < very good < near-best < best), typical for the model family,
-#             NOT measured on your microphone. Distil-Whisper figures are from its model cards.
-# Nothing here was measured on a Steam Deck or on your hardware: a slower processor makes every model slower.
-MODELS = {
-    # ---- English only (a little more accurate for English at the same size; smaller models gain most)
-    "tiny.en": (75, "English only. Basic accuracy. Fastest (about 10x the large model). Memory about 0.3 GB. Fine for short, clear commands."),
-    "base.en": (142, "English only. Fair accuracy. Very fast (about 7x large). Memory about 0.4 GB. Good for short phrases."),
-    "base.en-q5_1": (57, "English only. Compressed base: smaller download and less memory, accuracy close to base.en."),
-    "small.en": (466, "English only. Good accuracy. Fast (about 4x large). Memory about 0.9 GB. A good balance on most computers."),
-    "small.en-q5_1": (181, "English only. Compressed small: about 60% smaller, accuracy close to small.en. Memory about 0.5 GB (est.)."),
-    "medium.en": (1533, "English only. Very good accuracy. Moderate speed (about 2x large). Memory about 2.1 GB. Slow on weak processors."),
-    "medium.en-q5_0": (514, "English only. Compressed medium: a third of the size, accuracy close to medium.en. Memory about 0.8 GB (est.)."),
-    "distil-large-v3": (1449, "English only. Near-large accuracy (within about 1% of large-v3's error on long audio), about 6x faster. Memory about 2 GB (est.)."),
-    "distil-large-v3.5": (1449, "English only. Newest distilled model: near-large accuracy, a little lower error than turbo on short clips (per its card). Memory about 2 GB (est.)."),
-    # ---- Many languages (about 99)
-    "tiny": (75, "Many languages. Basic accuracy. Fastest (about 10x large). Memory about 0.3 GB."),
-    "base": (142, "Many languages. Fair accuracy. Very fast (about 7x large). Memory about 0.4 GB."),
-    "small": (466, "Many languages. Good accuracy. Fast (about 4x large). Memory about 0.9 GB."),
-    "small-q5_1": (181, "Many languages. Compressed small: about 60% smaller, accuracy close to small. Memory about 0.5 GB (est.)."),
-    "medium": (1533, "Many languages. Very good accuracy. Moderate speed (about 2x large). Memory about 2.1 GB."),
-    "medium-q5_0": (514, "Many languages. Compressed medium: a third of the size, accuracy close to medium. Memory about 0.8 GB (est.)."),
-    "large-v3-turbo-q5_0": (547, "Many languages. Near-best accuracy, heavily compressed turbo (about 8x large). Memory about 1 GB (est.). May lose a little accuracy against the original."),
-    "large-v3-turbo-q8_0": (834, "Many languages. Near-best accuracy, lightly compressed turbo (about 8x large): bigger and closer to the original than q5_0. Memory about 1.3 GB (est.)."),
-    "large-v3-turbo": (1624, "Many languages. Near-best accuracy, the original turbo (about 8x large). Memory about 2 GB (est.)."),
-    "large-v3-q5_0": (1031, "Many languages. Best accuracy, compressed. Slower than turbo (large speed). Memory about 2 GB (est.)."),
-    "large-v3": (2952, "Many languages. Best accuracy, the original. The slowest and heaviest. Memory about 3.9 GB."),
-}
+MODELS = ubermoc_models.MODELS          # name -> (approx size in MB, description); see py_modules/ubermoc_models.py
+DEFAULT_MODEL = ubermoc_models.DEFAULT_MODEL
 
 TYPE_TEST_TEXT = "Ubermoc Speech test"
 
@@ -163,7 +126,7 @@ class Plugin:
         return os.path.join(self._data_dir(), "models")
 
     def _model_path(self, name: str) -> str:
-        return os.path.join(self._models_dir(), f"ggml-{name}.bin")
+        return os.path.join(self._models_dir(), ubermoc_models.model_filename(name))
 
     def _model_ok(self, name: str) -> bool:
         path = self._model_path(name)
@@ -205,6 +168,8 @@ class Plugin:
     def _vad_on(self, name: str) -> bool:
         """Whether the voice detector is used with this model. It is on unless the user
         turned it off for that model."""
+        if not ubermoc_models.vad_supported(name):
+            return False           # Parakeet has no voice detector switch (it returns nothing for silence)
         chosen = self._load_settings().get("vad")
         if isinstance(chosen, dict) and isinstance(chosen.get(name), bool):
             return chosen[name]
@@ -260,7 +225,7 @@ class Plugin:
         if not self._model_ok(name):
             dest = self._model_path(name)
             tmp = dest + ".part"
-            url = MODEL_URLS.get(name, f"{MODEL_BASE_URL}/ggml-{name}.bin")
+            url = ubermoc_models.model_url(name)
             self.cancel_flags.discard(name)
             self.download_progress[name] = {"done": 0, "total": MODELS[name][0] * 1024 * 1024}
 
@@ -327,46 +292,44 @@ class Plugin:
         return self.download_progress
 
     async def status(self) -> dict:
-        binary = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "whisper-server")
+        binary = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", ubermoc_models.binary_name(self._selected() or DEFAULT_MODEL))
         return {
             "binary": os.path.exists(binary),
             "server": bool(self.server_proc and self.server_proc.poll() is None),
             "recording": bool(self.record_proc and self.record_proc.poll() is None),
         }
 
-    # ---------- whisper server ----------
+    # ---------- speech server (whisper.cpp or parakeet.cpp) ----------
     async def start_server(self) -> dict:
         if self.server_proc and self.server_proc.poll() is None:
             return {"ok": True}
         name = self._selected()
         if not name:
             return {"ok": False, "error": "no model selected; download one and select it first"}
-        binary = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", "whisper-server")
+        bname = ubermoc_models.binary_name(name)
+        binary = os.path.join(decky.DECKY_PLUGIN_DIR, "bin", bname)
         if not os.path.exists(binary):
-            return {"ok": False, "error": "whisper-server binary missing"}
+            return {"ok": False, "error": f"{bname} binary missing"}
         os.chmod(binary, 0o755)
         env = {**os.environ, "LD_LIBRARY_PATH": os.path.dirname(binary)}
-        cmd = [binary, "-m", self._model_path(name), "--host", HOST, "--port", str(PORT),
-               "-t", str(min(4, os.cpu_count() or 4)), "-nt"]
-        # With the voice detector on, only audio it hears as speech reaches the model, so
-        # noise and silence are not turned into stray words. The padding and low minimum
-        # keep the edges of short utterances.
         vad = os.path.join(os.path.dirname(binary), VAD_MODEL)
-        if os.path.exists(vad) and self._vad_on(name):
-            cmd += ["--vad", "-vm", vad, "-vp", "300", "-vspd", "120", "-vt", Plugin._vad_threshold(name)]
+        cmd = ubermoc_models.server_command(
+            name, binary, self._model_path(name), HOST, PORT, min(4, os.cpu_count() or 4),
+            vad_model=vad if os.path.exists(vad) else "", vad_on=self._vad_on(name),
+            vad_threshold=Plugin._vad_threshold(name))
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
-        log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "whisper-server.log"), "ab")
+        log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, f"{bname}.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
         deadline = time.time() + 90  # model load takes a few seconds
         while time.time() < deadline:
             if self.server_proc.poll() is not None:
-                return {"ok": False, "error": "whisper-server exited; see its log"}
+                return {"ok": False, "error": f"{bname} exited; see its log"}
             try:
                 with socket.create_connection((HOST, PORT), timeout=1):
                     return {"ok": True}
             except OSError:
                 await asyncio.sleep(0.25)
-        return {"ok": False, "error": "whisper-server did not start in time"}
+        return {"ok": False, "error": f"{bname} did not start in time"}
 
     async def stop_server(self) -> dict:
         proc = self.server_proc
@@ -875,11 +838,8 @@ class Plugin:
         return {"ok": True}
 
     def _transcribe(self, path: str) -> str:
-        fields = {"response_format": "json", "temperature": "0.0", "language": "en"}
-        if SHORT_AUDIO_CONTEXT:
-            seconds = max(0.0, (os.path.getsize(path) - 44) / WAV_BYTES_PER_SECOND)
-            # 50 encoder frames per second, plus 2 s of margin; never below 500.
-            fields["audio_ctx"] = str(min(1500, max(500, int((seconds + 2) * 50))))
+        seconds = max(0.0, (os.path.getsize(path) - 44) / WAV_BYTES_PER_SECOND)
+        url_path, fields = ubermoc_models.transcribe_request(self._selected(), seconds, SHORT_AUDIO_CONTEXT)
         boundary = uuid.uuid4().hex
         body = b""
         for k, v in fields.items():
@@ -891,7 +851,7 @@ class Plugin:
                  f'filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode()
         body += audio + f"\r\n--{boundary}--\r\n".encode()
         req = urllib.request.Request(
-            f"http://{HOST}:{PORT}/inference", data=body,
+            f"http://{HOST}:{PORT}{url_path}", data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         with urllib.request.urlopen(req, timeout=120) as r:
