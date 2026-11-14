@@ -5,11 +5,15 @@ transcribed text is typed into whatever has focus, in gaming mode and desktop mo
 Transcription is local, with two engines to choose from: [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
 (OpenAI Whisper models) and [parakeet.cpp](https://github.com/mudler/parakeet.cpp) (NVIDIA Parakeet models).
 
-The panel opens as four collapsible groups (one open at a time), with the update
+It also has a **Voice test**: pick the models you want to compare, read 22 short phrases (each recorded
+automatically), and the plugin scores every model on your own voice and tells you which is best for you.
+
+The panel opens as five collapsible groups (one open at a time), with the update
 section always visible at the bottom:
 - **Global options**: the activator, rumble (one buzz when recording starts, two when it stops, on any controller that can rumble; with a ten-step intensity slider; can be turned off), what is pressed around the typed text, and Typing settings (spoken symbols, method, speed)
 - **Applications**: different before / after inputs for specific Steam and non-Steam apps
 - **Models**: Current model, Choose a model (download / delete)
+- **Voice test**: find the best model for your voice (see below)
 - **Testing**: record a test, see the text, test typing
 - **Updates** (always shown): installs the latest GitHub release
 
@@ -82,6 +86,17 @@ versions, compressed `q5` versions and the rest) were not part of the test and s
   are licensed CC-BY-4.0; see `THIRD_PARTY.md`.
 - If the model you selected is no longer on the computer, the plugin falls back to a downloaded model (the
   recommended ones first); if none is downloaded, press Download on one.
+
+## Voice test
+Open the **Voice test** group. It walks you through:
+1. An introduction: about 5 minutes, disk space, and privacy (recordings are deleted as soon as the scores are ready; only the scores are kept).
+2. Choose the models to compare. Download sizes and your free space are shown, with stronger warnings on a handheld or when space is tight; downloading stops when less than 2 GB would remain.
+3. A microphone check with a live level bar.
+4. Read 22 phrases: normal sentences, spelled letters and digits, numbers, and words that sound alike. Each recording stops by itself when you stop talking.
+5. Every chosen model transcribes your recordings and is scored on the words and letters it gets wrong. Speed and memory are measured on your device.
+6. A table per model and "Best for your voice". A difference under 1.5 points is called a tie and the faster model is suggested. You can switch to the best model and delete the others.
+
+The test assumes you play with background noise (that is how most people use it). If you can get somewhere quiet, tick "I am in a quiet place" or use "Test again in a quiet place" to compare. No AI model is needed to score: it is plain code comparing what you were asked to say with what each model heard.
 
 ## Activator (hold to talk)
 Hold the activator to record, release to transcribe. It can be keyboard keys, mouse

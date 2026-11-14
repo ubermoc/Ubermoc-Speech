@@ -28,10 +28,12 @@ import decky  # provided by Decky Loader
 # Decky already puts <plugin>/py_modules on sys.path; do it explicitly as well.
 sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 import ubermoc_input  # noqa: E402
+import ubermoc_audio  # noqa: E402
 import ubermoc_models  # noqa: E402
 import ubermoc_rumble  # noqa: E402
 import ubermoc_settings  # noqa: E402
 import ubermoc_typing  # noqa: E402
+import ubermoc_voicetest  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 8178
@@ -68,6 +70,7 @@ def _ssl_context() -> ssl.SSLContext:
 
 class Plugin:
     server_proc: subprocess.Popen | None = None
+    server_model: str = ""       # the model the running server was started with
     server_task: "asyncio.Future | None" = None
     record_proc: subprocess.Popen | None = None
     record_path: str | None = None
@@ -110,6 +113,7 @@ class Plugin:
         if self.presser:
             self.presser.close()
         self._stop_recorder()
+        Plugin._vt_cleanup(self)
         await Plugin.stop_server(self)
 
     async def log(self, message: str) -> bool:
@@ -294,10 +298,13 @@ class Plugin:
         }
 
     # ---------- speech server (whisper.cpp or parakeet.cpp) ----------
-    async def start_server(self) -> dict:
+    async def start_server(self, name: str = "") -> dict:
+        """Start the speech server for `name` (default: the selected model). Used by dictation and by the voice test."""
+        name = name or self._selected()
         if self.server_proc and self.server_proc.poll() is None:
-            return {"ok": True}
-        name = self._selected()
+            if not name or name == self.server_model:
+                return {"ok": True}
+            await Plugin.stop_server(self)       # a different model is wanted: restart with it
         if not name:
             return {"ok": False, "error": "no model selected; download one and select it first"}
         bname = ubermoc_models.binary_name(name)
@@ -314,6 +321,7 @@ class Plugin:
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
         log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, f"{bname}.log"), "ab")
         self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
+        self.server_model = name
         deadline = time.time() + 90  # model load takes a few seconds
         while time.time() < deadline:
             if self.server_proc.poll() is not None:
@@ -335,6 +343,7 @@ class Plugin:
                 proc.kill()
         self.server_proc = None
         self.server_task = None
+        self.server_model = ""
         return {"ok": True}
 
     # ---------- recording + transcription ----------
@@ -831,9 +840,9 @@ class Plugin:
             self.hub.set_activator([])
         return {"ok": True}
 
-    def _transcribe(self, path: str) -> str:
+    def _transcribe(self, path: str, name: str = "") -> str:
         seconds = max(0.0, (os.path.getsize(path) - 44) / WAV_BYTES_PER_SECOND)
-        url_path, fields = ubermoc_models.transcribe_request(self._selected(), seconds, SHORT_AUDIO_CONTEXT)
+        url_path, fields = ubermoc_models.transcribe_request(name or self._selected(), seconds, SHORT_AUDIO_CONTEXT)
         boundary = uuid.uuid4().hex
         body = b""
         for k, v in fields.items():
@@ -850,6 +859,190 @@ class Plugin:
         )
         with urllib.request.urlopen(req, timeout=120) as r:
             return json.loads(r.read().decode()).get("text", "").strip()
+
+    # ---------- voice test ----------
+    # A guided test: the person reads 22 phrases, each is recorded (it stops by itself), every chosen model transcribes them,
+    # and the scores say which model is best for THIS voice on THIS device. Nothing here needs an AI model: the correct text is
+    # known because the person reads it. Recordings live in a temporary folder and are deleted as soon as the scoring is done.
+    vt: dict | None = None             # the test being run
+    vt_level: dict = {"db": -90.0, "speaking": False}
+    vt_run: dict | None = None         # progress of the scoring run
+    vt_cancel_flag: bool = False
+
+    def _vt_env(self) -> dict:
+        runtime = f"/run/user/{self._user_uid()}"
+        return {**os.environ, "XDG_RUNTIME_DIR": runtime, "PULSE_SERVER": f"unix:{runtime}/pulse/native"}
+
+    def _vt_level(self, rms: float, speaking: bool):
+        self.vt_level = {"db": round(ubermoc_audio.db(rms), 1), "speaking": bool(speaking)}
+
+    def _vt_cleanup(self):
+        info, self.vt = self.vt, None
+        if info and info.get("dir"):
+            shutil.rmtree(info["dir"], ignore_errors=True)
+        if self.phase == "voicetest":
+            self.phase = "idle"
+        self.vt_level = {"db": -90.0, "speaking": False}
+
+    async def vt_plan(self, names: list) -> dict:
+        """What the setup screen shows: the phrase count, the device, free space and a warning if the downloads are large."""
+        sel = {n: MODELS[n][0] for n in names if n in MODELS}
+        installed = {n for n in MODELS if self._model_ok(n)}
+        handheld = ubermoc_voicetest.is_handheld()
+        free = ubermoc_voicetest.free_mb(self._models_dir())
+        return {"phrases": len(ubermoc_voicetest.PHRASES), "minutes": 5, "handheld": handheld, "free_mb": free,
+                "plan": ubermoc_voicetest.space_plan(sel, installed, free, handheld),
+                "recorder": bool(ubermoc_audio.recorder_tool()), "saved": self._load_settings().get("voicetest") or {}}
+
+    async def vt_begin(self, names: list, condition: str) -> dict:
+        """Start a test with these (downloaded) models. condition: "noisy" (the default, how people really play) or "quiet"."""
+        if self.vt:
+            Plugin._vt_cleanup(self)
+        if self.phase != "idle":
+            return {"ok": False, "error": "busy: finish dictation first"}
+        names = [n for n in names if n in MODELS]
+        if not names:
+            return {"ok": False, "error": "pick at least one model"}
+        missing = [n for n in names if not self._model_ok(n)]
+        if missing:
+            return {"ok": False, "error": "download these first: " + ", ".join(missing)}
+        if not ubermoc_audio.recorder_tool():
+            return {"ok": False, "error": "no recorder program (parec/parecord) was found"}
+        self.vt = {"dir": tempfile.mkdtemp(prefix="ubermoc-voicetest-"), "models": names, "condition": "quiet" if condition == "quiet" else "noisy", "clips": {}}
+        self.vt_cancel_flag = False
+        self.vt_run = None
+        self.phase = "voicetest"
+        return {"ok": True, "total": len(ubermoc_voicetest.PHRASES)}
+
+    async def vt_mic_check(self) -> dict:
+        """Listen for five seconds while the person says "testing one two three"; report the level in plain words."""
+        if self.phase not in ("idle", "voicetest"):
+            return {"ok": False, "error": "busy"}
+        was_idle = self.phase == "idle"
+        self.phase = "voicetest"
+        try:
+            env = self._vt_env()
+            peak, level = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: ubermoc_audio.level_check(lambda: ubermoc_audio.stream(env), 5.0, self._vt_level))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        finally:
+            if was_idle:
+                self.phase = "idle"
+        kind, message = ubermoc_audio.mic_verdict(peak)
+        return {"ok": True, "peak": peak, "level": round(level), "kind": kind, "message": message}
+
+    async def vt_phrase(self, i: int) -> dict:
+        ph = ubermoc_voicetest.PHRASES
+        if not 0 <= i < len(ph):
+            return {"ok": False, "error": "no such phrase"}
+        kind, text, _accept, hint = ph[i]
+        return {"ok": True, "i": i, "total": len(ph), "kind": kind, "text": text, "hint": hint}
+
+    async def vt_record(self, i: int) -> dict:
+        """Record phrase i. It starts listening at once and stops by itself about a second after the person stops talking."""
+        if not self.vt or not 0 <= i < len(ubermoc_voicetest.PHRASES):
+            return {"ok": False, "error": "no test is running"}
+        path = os.path.join(self.vt["dir"], f"{i:02d}.wav")
+        env = self._vt_env()
+        self.vt_cancel_flag = False
+        try:
+            reason, sec = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: ubermoc_audio.record_auto(path, lambda: ubermoc_audio.stream(env), self._vt_level, lambda: self.vt_cancel_flag))
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)}
+        _s, peak = ubermoc_audio.wav_stats(path)
+        warn = ("" if reason == "finished" and peak >= 3000 else
+                "Nothing was heard. Is the microphone on and not muted?" if reason == "nothing-heard" else
+                "It kept listening for 20 seconds. Try again." if reason == "too-long" else
+                "Very quiet. Speak up or move the microphone closer." if reason == "finished" else "")
+        if reason == "finished" and peak >= 32000:
+            warn = "The sound is clipping. Move the microphone a little farther away."
+        ok = reason == "finished" and sec >= 0.8 and peak >= 800
+        if ok:
+            self.vt["clips"][i] = path
+        return {"ok": ok, "reason": reason, "seconds": round(sec, 1), "peak": peak, "warn": warn}
+
+    async def vt_status(self) -> dict:
+        v = self.vt
+        return {"active": bool(v), "level": self.vt_level, "recorded": sorted(v["clips"]) if v else [], "run": self.vt_run,
+                "condition": v["condition"] if v else "", "phase": self.phase}
+
+    async def vt_run_start(self) -> dict:
+        """Run every chosen model over the recordings, one at a time. Progress is in vt_status()."""
+        v = self.vt
+        if not v or not v["clips"]:
+            return {"ok": False, "error": "record some phrases first"}
+        if self.vt_run and not self.vt_run.get("done"):
+            return {"ok": False, "error": "already running"}
+        self.vt_run = {"model": "", "index": 0, "total": len(v["models"]), "clip": 0, "clips": len(v["clips"]), "done": False, "error": "", "results": None}
+        asyncio.ensure_future(Plugin._vt_run_task(self))
+        return {"ok": True}
+
+    async def _vt_run_task(self):
+        v, run = self.vt, self.vt_run
+        results = {}
+        try:
+            for mi, name in enumerate(v["models"]):
+                if self.vt_cancel_flag:
+                    break
+                run.update(model=name, index=mi, clip=0)
+                await Plugin.stop_server(self)
+                started = await Plugin.start_server(self, name)
+                if not started.get("ok"):
+                    results[name] = {"score": None, "error": started.get("error", "could not start")}
+                    continue
+                rows = []
+                for i, path in sorted(v["clips"].items()):
+                    if self.vt_cancel_flag:
+                        break
+                    t0 = time.time()
+                    try:
+                        heard = await asyncio.get_event_loop().run_in_executor(None, self._transcribe, path, name)
+                    except Exception as e:  # noqa: BLE001
+                        heard = ""
+                        decky.logger.warning(f"voice test: {name} failed on phrase {i}: {e}")
+                    sec = time.time() - t0
+                    group, errors, units, _subs = ubermoc_voicetest.score_phrase(ubermoc_voicetest.PHRASES[i], heard)
+                    rows.append({"group": group, "errors": errors, "units": units, "sec": sec})
+                    run["clip"] = len(rows)
+                summary = ubermoc_voicetest.summarize(rows)
+                summary["memory_mb"] = ubermoc_voicetest.process_memory_mb(self.server_proc.pid) if self.server_proc else 0
+                summary["size_mb"] = MODELS[name][0]
+                results[name] = summary
+                await Plugin.stop_server(self)
+            if not self.vt_cancel_flag:
+                verdict = ubermoc_voicetest.verdict(results)
+                out = {"models": results, "verdict": verdict, "when": int(time.time()), "phrases": len(v["clips"])}
+                run["results"] = out
+                saved = dict(self._load_settings().get("voicetest") or {})
+                saved[v["condition"]] = out
+                self._save_settings(voicetest=saved)
+        except Exception as e:  # noqa: BLE001
+            decky.logger.error(f"voice test failed: {e}")
+            run["error"] = str(e)
+        finally:
+            await Plugin.stop_server(self)
+            shutil.rmtree(v["dir"], ignore_errors=True)      # the recordings are deleted as soon as they are scored
+            v["clips"] = {}
+            run["done"] = True
+            if self.phase == "voicetest":
+                self.phase = "idle"
+
+    async def vt_cancel(self) -> dict:
+        self.vt_cancel_flag = True
+        if not (self.vt_run and not self.vt_run.get("done")):
+            Plugin._vt_cleanup(self)
+        return {"ok": True}
+
+    async def vt_finish(self) -> dict:
+        """Leave the test screen: delete any recordings and make dictation available again."""
+        if self.vt_run and not self.vt_run.get("done"):
+            self.vt_cancel_flag = True
+            return {"ok": True}
+        Plugin._vt_cleanup(self)
+        self.vt_run = None
+        return {"ok": True}
 
     # ---------- self-update ----------
     def _read_file(self, name: str) -> str:

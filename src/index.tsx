@@ -18,6 +18,7 @@ import {
 } from "@decky/ui";
 import { Component, ReactNode, useEffect, useRef, useState } from "react";
 import { FaMicrophone } from "react-icons/fa";
+import { VoiceTest } from "./voicetest";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 declare const SteamClient: any;
@@ -28,7 +29,7 @@ void PROVENANCE;
 
 // ---------- types ----------
 interface Status { binary: boolean; server: boolean; recording: boolean }
-type Phase = "idle" | "starting" | "recording" | "transcribing" | "typing";
+type Phase = "idle" | "starting" | "recording" | "transcribing" | "typing" | "voicetest";
 interface ModelInfo { name: string; size_mb: number; description: string; installed: boolean }
 interface ModelList { selected: string; vad: boolean; models: ModelInfo[] }
 interface DlProgress { done: number; total: number }
@@ -498,6 +499,7 @@ function Panel() {
     : phase === "starting" ? "Starting microphone..."
     : phase === "recording" ? "Listening..."
     : phase === "transcribing" ? "Transcribing..."
+    : phase === "voicetest" ? "Voice test in progress"
     : "Typing...";
   const last = dict.last;
   const resultText = last ? (last.ok ? last.text || "(nothing heard)" : last.error ?? "Transcription failed") : "";
@@ -988,6 +990,13 @@ function Panel() {
       </PanelSection>
 
         </>
+      )}
+
+      <GroupHeader label="Voice test" summary="Find the best model for your voice" open={open === "voicetest"} onToggle={() => toggleGroup("voicetest")} />
+      {open === "voicetest" && (
+        <Boundary>
+          <VoiceTest models={models} refresh={refresh} active={active} />
+        </Boundary>
       )}
 
       <GroupHeader label="Testing" summary={phaseText} open={open === "testing"} onToggle={() => toggleGroup("testing")} />
