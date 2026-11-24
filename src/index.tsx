@@ -12,7 +12,6 @@ import {
   PanelSectionRow,
   ProgressBarWithInfo,
   Router,
-  SliderField,
   ToggleField,
   definePlugin,
 } from "@decky/ui";
@@ -44,7 +43,7 @@ interface OverrideInfo {
   appid: string; name: string; kind: "steam" | "shortcut"; before: KeyAction; after: KeyAction; symbols: "words" | "symbols";
   // every one optional: an empty string / null means this app follows the Global setting
   activator: string[]; activator_label: string; activator_warnings: string[];
-  model: string; model_installed: boolean; model_loaded: boolean;
+  model: string; model_installed: boolean; model_loaded: boolean; use_secondary: boolean;
   speed: "fast" | "normal" | "slow" | "";
   method: "keyboard" | "steam" | "";
   rumble: boolean | null; rumble_level: number | null; vad: boolean | null;
@@ -55,7 +54,7 @@ interface OverridesInfo {
   overrides: OverrideInfo[];
   running: { appid: string; name: string; has_override: boolean };
   global?: {
-    activator_label: string; model: string; speed: "fast" | "normal" | "slow";
+    activator_label: string; model: string; secondary_model: string; secondary_installed: boolean; speed: "fast" | "normal" | "slow";
     symbols: "words" | "symbols"; method: "keyboard" | "steam";
     rumble: boolean; rumble_level: number; vad: boolean; vad_supported: boolean;
   };
@@ -168,6 +167,7 @@ const setOverrideField = callable<[string, string, string | boolean | number], O
 const setAppHidden = callable<[string, boolean], OverridesInfo>("set_app_hidden");
 const setShowHidden = callable<[boolean], OverridesInfo>("set_show_hidden");
 const setKeepLoaded = callable<[boolean], OverridesInfo>("set_keep_loaded");
+const setSecondaryModel = callable<[string], OverridesInfo>("set_secondary_model");
 const removeOverride = callable<[string], OverridesInfo>("remove_override");
 const setRunningApp = callable<[string, string], boolean>("set_running_app");
 const typeAck = callable<[string, boolean], boolean>("type_ack");
@@ -216,6 +216,8 @@ function uiButton(id: number, down: boolean) {
 let lastChoice = "";
 // Which groups are expanded; kept at module level so closing and reopening the menu keeps them.
 let openGroup: string | null = null;
+// Which drop-down inside Applications overrides is open (Applications first); module level like openGroup.
+let openSub: string | null = "app";
 // The app being edited in Applications; module level because Decky can re-create the panel.
 let editedApp = "";
 
@@ -313,6 +315,21 @@ function GroupHeader(props: { label: string; summary: string; open: boolean; onT
           {props.label}
         </ButtonItem>
       </PanelSectionRow>
+    </PanelSection>
+  );
+}
+
+// A drop-down inside a group: its header shows what is chosen when it is closed; one is open at a time.
+function Drop(props: { label: string; summary?: string; open: boolean; onToggle: () => void; children?: ReactNode }) {
+  return (
+    <PanelSection>
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={props.onToggle} description={props.open ? undefined : props.summary}>
+          {props.open ? "v " : "> "}
+          {props.label}
+        </ButtonItem>
+      </PanelSectionRow>
+      {props.open && props.children}
     </PanelSection>
   );
 }
@@ -522,6 +539,10 @@ function Panel() {
     setOpen(openGroup);
   };
 
+  const [sub, setSub] = useState<string | null>(openSub);
+  const toggleSub = (key: string) => { openSub = sub === key ? null : key; setSub(openSub); };
+  const closeSub = () => { openSub = null; setSub(null); };
+
   const phase = dict.phase;
   const phaseText =
     phase === "idle" ? "Idle"
@@ -702,11 +723,70 @@ function Panel() {
       <GroupHeader label="Global options" summary={act?.label ? act.label : "Activator not set"} open={open === "global"} onToggle={() => toggleGroup("global")} />
       {open === "global" && (
         <>
-      <PanelSection title="Activator">
+      <Drop
+        label="Models"
+        summary={active ? `Main model: ${active}` : "No model yet"}
+        open={sub === "gmodels"}
+        onToggle={() => toggleSub("gmodels")}
+      >
+        <PanelSectionRow>
+          <div style={{ opacity: 0.7, fontSize: 12 }}>
+            {(ovr?.loaded_models ?? []).length > 0
+              ? `Loaded now: ${(ovr?.loaded_models ?? []).join(", ")}`
+              : "No model is loaded right now"}
+          </div>
+        </PanelSectionRow>
+        {downloaded.length > 0 ? (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Main model"
+              description={activeInfo?.description ?? "The model that transcribes every app that has no model of its own. Pick one of your downloaded models."}
+              rgOptions={downloaded.map((m) => ({ data: m.name, label: m.name }))}
+              selectedOption={ready ? active : undefined}
+              strDefaultLabel="Select a model"
+              onChange={(o) => useModel(o.data as string)}
+            />
+          </PanelSectionRow>
+        ) : (
+          <PanelSectionRow>
+            <Field label="No model yet" description="Download one under Download models, then select it here" />
+          </PanelSectionRow>
+        )}
+        {downloaded.length > 0 && (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Secondary model"
+              description="A second model you can give to any application (Applications overrides, then the app, then Models). Choose None to use only the main model."
+              strDefaultLabel="None"
+              rgOptions={[
+                { data: "", label: "None (main model only)" },
+                ...downloaded.filter((m) => m.name !== active).map((m) => ({ data: m.name, label: m.name })),
+              ]}
+              selectedOption={ovr?.global?.secondary_model ?? ""}
+              onChange={async (o) => setOvr(await setSecondaryModel(o.data as string))}
+            />
+          </PanelSectionRow>
+        )}
+        <PanelSectionRow>
+          <ToggleField
+            label="Keep both models loaded"
+            description="Keeps the main model and an app's secondary model running at the same time, so switching apps is instant and no dictation waits. Costs about 90 MB per model. Off: one model at a time."
+            checked={ovr?.keep_loaded ?? false}
+            onChange={async (on: boolean) => setOvr(await setKeepLoaded(on))}
+          />
+        </PanelSectionRow>
+        {(ovr?.keep_loaded ?? false) && !(ovr?.global?.secondary_model) && (
+          <PanelSectionRow>
+            <Field label="Note">Choose a Secondary model above. With none chosen only the main model is loaded.</Field>
+          </PanelSectionRow>
+        )}
+      </Drop>
+
+      <Drop label="Activator" summary={act?.label || "Not set"} open={sub === "gactivator"} onToggle={() => toggleSub("gactivator")}>
         <PanelSectionRow>
           <Field
-            label="Hold to talk"
-            description="Hold it to record, release to transcribe. Keyboard keys, mouse buttons and controller buttons all work, alone or as a combination."
+            label="Activator"
+            description="The button that starts dictation. Hold it to record, release to transcribe. Keyboard keys, mouse buttons and controller buttons all work, alone or as a combination."
           >
             {act?.label || "Not set"}
           </Field>
@@ -718,7 +798,7 @@ function Panel() {
         ) : (
           <PanelSectionRow>
             <ButtonItem layout="below" onClick={beginCapture} description={capMsg || undefined}>
-              {act?.label ? "Change activator" : "Set activator"}
+              {act?.label ? "Change activator" : "Record activator"}
             </ButtonItem>
           </PanelSectionRow>
         )}
@@ -757,62 +837,25 @@ function Panel() {
             {watchText(act?.watching)}
           </Field>
         </PanelSectionRow>
-      </PanelSection>
+      </Drop>
 
-      <PanelSection title="Feedback">
-        <PanelSectionRow>
-          <ToggleField
-            label="Rumble"
-            description="Any controller that can rumble. One short buzz when recording starts, two when it stops, so you know it is listening."
-            checked={rumbleOn}
-            onChange={async (on: boolean) => {
-              setRumbleOn(on);
-              await setRumble(on);
-            }}
-          />
-        </PanelSectionRow>
-        {rumbleOn && (
-          <PanelSectionRow>
-            <SliderField
-              label="Intensity"
-              description="Release to feel a sample."
-              value={rumbleLevel}
-              min={1}
-              max={10}
-              step={1}
-              notchCount={10}
-              notchLabels={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => ({ notchIndex: n - 1, label: String(n), value: n }))}
-              notchTicksVisible
-              showValue={false}
-              onChange={async (n: number) => {
-                setRumbleLevelState(n);
-                await setRumbleLevel(n);
-              }}
-            />
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
-      <PanelSection title="Around the typed text">
-        {keyActionRows("before", "Press before typing", "Pressed first, then the text is typed. Enter opens a chat box in most games.")}
-        {keyActionRows("after", "Press after typing", "Pressed once the text is typed. Enter sends it.")}
-      </PanelSection>
-
-      <PanelSection title="Typing">
+      <Drop
+        label="Typing"
+        summary={`${typing?.speed ?? "normal"}, ${typing?.method ?? "keyboard"}`}
+        open={sub === "gtyping"}
+        onToggle={() => toggleSub("gtyping")}
+      >
         <PanelSectionRow>
           <DropdownItem
-            label="Spoken symbols"
-            description={
-              (typing?.symbols ?? "words") === "symbols"
-                ? 'Saying "backslash" types \\ . Also: forward slash, underscore, at sign, hyphen, open/close parenthesis, bracket and brace, semicolon, ampersand, asterisk, plus sign, equals sign, dollar sign, percent sign, hashtag, tilde, caret, vertical bar, backtick.'
-                : 'Saying "backslash" types the word backslash.'
-            }
+            label="Typing speed"
+            description="How fast the keys are pressed. Use Slow if a game drops letters."
             rgOptions={[
-              { data: "words", label: "Type the word (backslash)" },
-              { data: "symbols", label: "Type the symbol (\\)" },
+              { data: "fast", label: "Fast" },
+              { data: "normal", label: "Normal" },
+              { data: "slow", label: "Slow" },
             ]}
-            selectedOption={typing?.symbols ?? "words"}
-            onChange={(o) => applyTyping({ symbols: o.data as TypingInfo["symbols"] })}
+            selectedOption={typing?.speed ?? "normal"}
+            onChange={(o) => applyTyping({ speed: o.data as TypingInfo["speed"] })}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -833,15 +876,17 @@ function Panel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Typing speed"
-            description="Use Slow if a game drops letters."
+            label="Spoken symbols"
+            description={
+              ((typing?.symbols ?? "words") === "symbols" ? 'Saying "backslash" types \\ ' : 'Saying "backslash" types the word backslash.') +
+              " All the symbols: forward slash, underscore, at sign, hyphen, open/close parenthesis, bracket and brace, semicolon, ampersand, asterisk, plus sign, equals sign, dollar sign, percent sign, hashtag, tilde, caret, vertical bar, backtick."
+            }
             rgOptions={[
-              { data: "fast", label: "Fast" },
-              { data: "normal", label: "Normal" },
-              { data: "slow", label: "Slow" },
+              { data: "words", label: "Type the word (backslash)" },
+              { data: "symbols", label: "Type the symbol (\\)" },
             ]}
-            selectedOption={typing?.speed ?? "normal"}
-            onChange={(o) => applyTyping({ speed: o.data as TypingInfo["speed"] })}
+            selectedOption={typing?.symbols ?? "words"}
+            onChange={(o) => applyTyping({ symbols: o.data as TypingInfo["symbols"] })}
           />
         </PanelSectionRow>
         <PanelSectionRow>
@@ -852,15 +897,96 @@ function Panel() {
             {typing ? (typing.keyboard.available ? "Ready" : `Unavailable: ${typing.keyboard.reason}`) : "..."}
           </Field>
         </PanelSectionRow>
-      </PanelSection>
+      </Drop>
 
+      <Drop label="Press keys around the text" summary="Before and after typing" open={sub === "gkeys"} onToggle={() => toggleSub("gkeys")}>
+        {keyActionRows("before", "Press before typing", "Pressed first, then the text is typed. Enter opens a chat box in most games.")}
+        {keyActionRows("after", "Press after typing", "Pressed once the text is typed. Enter sends it.")}
+      </Drop>
+
+      <Drop
+        label="Rumble"
+        summary={rumbleOn ? `On, intensity ${rumbleLevel}` : "Off"}
+        open={sub === "grumble"}
+        onToggle={() => toggleSub("grumble")}
+      >
+        <PanelSectionRow>
+          <DropdownItem
+            label="Rumble"
+            description="One short buzz when recording starts, two when it stops, on any controller that can rumble."
+            rgOptions={[
+              { data: "on", label: "On" },
+              { data: "off", label: "Off" },
+            ]}
+            selectedOption={rumbleOn ? "on" : "off"}
+            onChange={async (o) => {
+              const on = o.data === "on";
+              setRumbleOn(on);
+              await setRumble(on);
+            }}
+          />
+        </PanelSectionRow>
+        {rumbleOn && (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Intensity"
+              description="How strong the buzz is. 1 is the lightest, 10 the strongest. You feel a sample when you pick one."
+              rgOptions={[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => ({ data: String(n), label: String(n) }))}
+              selectedOption={String(rumbleLevel)}
+              onChange={async (o) => {
+                const n = Number(o.data);
+                setRumbleLevelState(n);
+                await setRumbleLevel(n);
+              }}
+            />
+          </PanelSectionRow>
+        )}
+      </Drop>
+
+      <Drop
+        label="Voice detector"
+        summary={ready ? (vadOn ? "On" : "Off") : "Select a model first"}
+        open={sub === "gvad"}
+        onToggle={() => toggleSub("gvad")}
+      >
+        {downloaded.length > 0 && ready ? (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Voice detector"
+              description="Skips noise and silence so they are not typed as stray words. Turn it off if it ever cuts off a quiet word. Remembered for each model. Parakeet models have no detector, so this does nothing for them."
+              rgOptions={[
+                { data: "on", label: "On" },
+                { data: "off", label: "Off" },
+              ]}
+              selectedOption={vadOn ? "on" : "off"}
+              onChange={async (o) => {
+                const on = o.data === "on";
+                setVadOn(on);
+                await setVad(on);
+                await refresh();
+              }}
+            />
+          </PanelSectionRow>
+        ) : (
+          <PanelSectionRow>
+            <Field label="Voice detector">Select a model first (under Models).</Field>
+          </PanelSectionRow>
+        )}
+      </Drop>
         </>
       )}
 
       <GroupHeader label="Applications overrides" summary={appsSummary} open={open === "apps"} onToggle={() => toggleGroup("apps")} />
       {open === "apps" && (
         <>
-      <PanelSection title="Choose the application to override">
+      {/* Every part is its own drop-down, one open at a time: Applications first, then (for the chosen app) Models,
+          Activator, Typing, Press keys, Rumble, Voice detector and Manage. */}
+      <Drop
+        label="Applications"
+        summary={curApp ? curApp.name : "Choose an application"}
+        open={sub === "app"}
+        onToggle={() => toggleSub("app")}
+      >
         <PanelSectionRow>
           <Field
             label="Running now"
@@ -871,33 +997,18 @@ function Panel() {
         </PanelSectionRow>
         <PanelSectionRow>
           <DropdownItem
-            label="Applications"
-            description="Steam games first, then apps added to Steam as non-Steam shortcuts. Pick one: its own options are below."
+            label="Application to override"
+            description="Steam games first, then apps added to Steam as non-Steam shortcuts. Pick one: its own options open below."
             strDefaultLabel={appsList.length ? "Choose an application..." : "No installed apps found"}
             rgOptions={appsList}
             selectedOption={curApp?.hidden ? null : curApp?.appid ?? null}
-            onChange={(o) => { const id = o.data as string; if (id && id !== "category") void pickApp(id); }}
+            onChange={(o) => { const id = o.data as string; if (id && id !== "category") { void pickApp(id); closeSub(); } }}
           />
         </PanelSectionRow>
-        <PanelSectionRow>
-          <ToggleField
-            label="Keep both models loaded"
-            description="Keeps the global model and an app's own model running at the same time, so switching apps is instant and no dictation waits. Costs about 90 MB per model. Off: one model at a time."
-            checked={ovr?.keep_loaded ?? false}
-            onChange={async (on: boolean) => setOvr(await setKeepLoaded(on))}
-          />
-        </PanelSectionRow>
-        {(ovr?.loaded_models ?? []).length > 0 && (
-          <PanelSectionRow>
-            <Field label="Models loaded now" description="A loaded model is ready to use with no waiting.">
-              {(ovr?.loaded_models ?? []).join(", ")}
-            </Field>
-          </PanelSectionRow>
-        )}
         <PanelSectionRow>
           <ToggleField
             label="Show hidden"
-            description="Applications you hid are not in the list above. Turn this on to get a Hidden applications dropdown, where you can edit an app and unhide it."
+            description="Applications you hid are not in the list above. Turn this on to get a Hidden applications list, where you can edit an app and unhide it."
             checked={ovr?.show_hidden ?? false}
             onChange={async (on: boolean) => setOvr(await setShowHidden(on))}
           />
@@ -910,242 +1021,280 @@ function Panel() {
               strDefaultLabel={hiddenList.length ? "Choose a hidden app..." : "Nothing is hidden"}
               rgOptions={hiddenList}
               selectedOption={curApp?.hidden ? curApp.appid : null}
-              onChange={(o) => { setSelApp(o.data as string); setConfirmRemove(false); }}
+              onChange={(o) => { setSelApp(o.data as string); setConfirmRemove(false); closeSub(); }}
             />
           </PanelSectionRow>
         )}
-      </PanelSection>
+      </Drop>
 
       {curApp && (
-        <PanelSection title={`${curApp.name} - own options`}>
+        <>
           {/* Every option Global options has, for this app. A row shows Global when this app has
               no setting of its own, and the app follows Global for that one. */}
-          <PanelSectionRow>
-            <Field
-              label="Activator"
-              description="The button that starts dictation in this app. Steam reports the running app in gaming mode only."
-            >
-              {curApp.activator_label ? curApp.activator_label : `Global (${ovr?.global?.activator_label ?? "not set"})`}
-            </Field>
-          </PanelSectionRow>
-          {capTarget === `activator@${curApp.appid}` ? (
+          <Drop
+            label="Models"
+            summary={curApp.model ? curApp.model : curApp.use_secondary && ovr?.global?.secondary_model ? `Secondary: ${ovr.global.secondary_model}` : `Main: ${ovr?.global?.model ?? "not set"}`}
+            open={sub === "models"}
+            onToggle={() => toggleSub("models")}
+          >
             <PanelSectionRow>
-              <ListeningBox value={cap?.label ?? ""} secondsLeft={secondsLeft} onTouchCancel={() => cancelCapture()} />
+              <div style={{ opacity: 0.7, fontSize: 12 }}>
+                {(ovr?.loaded_models ?? []).length > 0
+                  ? `Loaded now: ${(ovr?.loaded_models ?? []).join(", ")}`
+                  : "No model is loaded right now"}
+              </div>
             </PanelSectionRow>
-          ) : (
+            <PanelSectionRow>
+              <Field label="Main model" description="The model from Global options. It transcribes every app that does not use the secondary model.">
+                {ovr?.global?.model ?? "not set"}
+              </Field>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <Field
+                label="Secondary model"
+                description="Chosen in Global options, under Models. Keep both models loaded is also switched there."
+              >
+                {ovr?.global?.secondary_model ? ovr.global.secondary_model : "None chosen yet"}
+              </Field>
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Model for this app"
+                description={`Which of the two models transcribes ${curApp.name}.`}
+                rgOptions={[
+                  { data: "main", label: `Main model (${ovr?.global?.model ?? "not set"})` },
+                  ...(ovr?.global?.secondary_model ? [{ data: "secondary", label: `Secondary model (${ovr.global.secondary_model})` }] : []),
+                ]}
+                selectedOption={curApp.model ? "main" : curApp.use_secondary && ovr?.global?.secondary_model ? "secondary" : "main"}
+                onChange={async (o) => {
+                  if (curApp.model) await applyOverride(curApp.appid, "model", "");   // an older per-app model is replaced by this choice
+                  await applyOverride(curApp.appid, "use_secondary", o.data === "secondary");
+                }}
+              />
+            </PanelSectionRow>
+            {curApp.model && (
+              <PanelSectionRow>
+                <Field label="Note">
+                  {curApp.name} still uses {curApp.model}, set before the secondary model moved to Global options. Picking Main or Secondary above replaces it.
+                </Field>
+              </PanelSectionRow>
+            )}
+            {curApp.use_secondary && !ovr?.global?.secondary_model && (
+              <PanelSectionRow>
+                <Field label="Note">No secondary model is chosen, so {curApp.name} uses the main model. Choose one in Global options.</Field>
+              </PanelSectionRow>
+            )}
+            {!(ovr?.keep_loaded ?? false) && curApp.use_secondary && ovr?.global?.secondary_model && (
+              <PanelSectionRow>
+                <Field label="Note">
+                  The first dictation in {curApp.name} waits a few seconds while the secondary model loads. Turn on Keep both models loaded in Global options to keep it ready.
+                </Field>
+              </PanelSectionRow>
+            )}
+          </Drop>
+
+          <Drop
+            label="Activator"
+            summary={curApp.activator_label ? curApp.activator_label : `Global (${ovr?.global?.activator_label ?? "not set"})`}
+            open={sub === "activator"}
+            onToggle={() => toggleSub("activator")}
+          >
+            <PanelSectionRow>
+              <Field
+                label="Activator"
+                description="The button that starts dictation in this app. Steam reports the running app in gaming mode only."
+              >
+                {curApp.activator_label ? curApp.activator_label : `Global (${ovr?.global?.activator_label ?? "not set"})`}
+              </Field>
+            </PanelSectionRow>
+            {capTarget === `activator@${curApp.appid}` ? (
+              <PanelSectionRow>
+                <ListeningBox value={cap?.label ?? ""} secondsLeft={secondsLeft} onTouchCancel={() => cancelCapture()} />
+              </PanelSectionRow>
+            ) : (
+              <PanelSectionRow>
+                <ButtonItem
+                  layout="below"
+                  onClick={() => beginKeyCapture("activator", curApp.appid)}
+                  description={keyMsg[`activator@${curApp.appid}`] || undefined}
+                >
+                  {curApp.activator_label ? "Change this app's activator" : "Record this app's activator"}
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            {curApp.activator.length > 0 && (
+              <PanelSectionRow>
+                <ButtonItem layout="below" onClick={() => applyOverride(curApp.appid, "activator", "")}>
+                  Clear (use Global)
+                </ButtonItem>
+              </PanelSectionRow>
+            )}
+            {curApp.activator_warnings.map((w) => (
+              <PanelSectionRow key={w}>
+                <Field label="Note">{w}</Field>
+              </PanelSectionRow>
+            ))}
+          </Drop>
+
+          <Drop
+            label="Typing"
+            summary={`${curApp.speed || `Global (${ovr?.global?.speed ?? "normal"})`}, ${curApp.method || `Global (${ovr?.global?.method ?? "keyboard"})`}`}
+            open={sub === "typing"}
+            onToggle={() => toggleSub("typing")}
+          >
+            <PanelSectionRow>
+              <DropdownItem
+                label="Typing speed"
+                description="How fast the keys are pressed in this app. Use Slow if this app drops letters."
+                rgOptions={[
+                  { data: "", label: `Global (${ovr?.global?.speed ?? "normal"})` },
+                  { data: "fast", label: "Fast" },
+                  { data: "normal", label: "Normal" },
+                  { data: "slow", label: "Slow" },
+                ]}
+                selectedOption={curApp.speed}
+                onChange={(o) => applyOverride(curApp.appid, "speed", o.data as string)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Typing method"
+                description={
+                  (curApp.method || ovr?.global?.method || "keyboard") === "steam"
+                    ? "Uses Steam's own keyboard. Gaming mode only; falls back to the virtual keyboard if Steam does not answer."
+                    : "A virtual keyboard created by the plugin. Works everywhere, including Steam's search box."
+                }
+                rgOptions={[
+                  { data: "", label: `Global (${(ovr?.global?.method ?? "keyboard") === "steam" ? "Steam keyboard" : "virtual keyboard"})` },
+                  { data: "keyboard", label: "Virtual keyboard (works everywhere)" },
+                  { data: "steam", label: "Steam keyboard (gaming mode only)" },
+                ]}
+                selectedOption={curApp.method}
+                onChange={(o) => applyOverride(curApp.appid, "method", o.data as string)}
+              />
+            </PanelSectionRow>
+            <PanelSectionRow>
+              <DropdownItem
+                label="Spoken symbols"
+                description={
+                  (curApp.symbols === "symbols" ? "Saying \"backslash\" types \\ " : "Saying \"backslash\" types the word backslash.") +
+                  " All the symbols: forward slash, underscore, at sign, hyphen, open/close parenthesis, bracket and brace, semicolon, ampersand, asterisk, plus sign, equals sign, dollar sign, percent sign, hashtag, tilde, caret, vertical bar, backtick."
+                }
+                rgOptions={[
+                  { data: "", label: `Global (${(ovr?.global?.symbols ?? "words") === "symbols" ? "symbol" : "word"})` },
+                  { data: "words", label: "Type the word (backslash)" },
+                  { data: "symbols", label: "Type the symbol (\\)" },
+                ]}
+                selectedOption={curApp.symbols}
+                onChange={async (o) => setOvr(await setOverrideSymbols(curApp.appid, o.data as string))}
+              />
+            </PanelSectionRow>
+          </Drop>
+
+          <Drop label="Press keys around the text" summary="Before and after typing" open={sub === "keys"} onToggle={() => toggleSub("keys")}>
+            {keyActionRows("before", "Press before typing", "Pressed first, then the text is typed. Enter opens a chat box in most games.", curApp.appid)}
+            {keyActionRows("after", "Press after typing", "Pressed once the text is typed. Enter sends it.", curApp.appid)}
+          </Drop>
+
+          <Drop
+            label="Rumble"
+            summary={curApp.rumble === null ? `Global (${ovr?.global?.rumble ? "on" : "off"})` : curApp.rumble ? "On" : "Off"}
+            open={sub === "rumble"}
+            onToggle={() => toggleSub("rumble")}
+          >
+            <PanelSectionRow>
+              <DropdownItem
+                label="Rumble"
+                description="One short buzz when recording starts, two when it stops. Off means no rumble in this app, even when Global has it on."
+                rgOptions={[
+                  { data: "", label: `Global (${ovr?.global?.rumble ? "on" : "off"})` },
+                  { data: "on", label: "On" },
+                  { data: "off", label: "Off" },
+                ]}
+                selectedOption={curApp.rumble === null ? "" : curApp.rumble ? "on" : "off"}
+                onChange={(o) => applyOverride(curApp.appid, "rumble", o.data === "" ? "" : o.data === "on")}
+              />
+            </PanelSectionRow>
+            {(curApp.rumble === true || (curApp.rumble === null && ovr?.global?.rumble)) && (
+              <PanelSectionRow>
+                <DropdownItem
+                  label="Intensity"
+                  description="How strong the buzz is in this app. 1 is the lightest, 10 the strongest."
+                  rgOptions={[
+                    { data: "", label: `Global (${ovr?.global?.rumble_level ?? 3})` },
+                    ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => ({ data: String(n), label: String(n) })),
+                  ]}
+                  selectedOption={curApp.rumble_level === null ? "" : String(curApp.rumble_level)}
+                  onChange={(o) => applyOverride(curApp.appid, "rumble_level", o.data === "" ? "" : Number(o.data))}
+                />
+              </PanelSectionRow>
+            )}
+          </Drop>
+
+          <Drop
+            label="Voice detector"
+            summary={curApp.vad === null ? `Global (${ovr?.global?.vad ? "on" : "off"})` : curApp.vad ? "On" : "Off"}
+            open={sub === "vad"}
+            onToggle={() => toggleSub("vad")}
+          >
+            <PanelSectionRow>
+              <DropdownItem
+                label="Voice detector"
+                description="Skips noise and silence so they are not typed as stray words. Turn it off if it ever cuts off a quiet word. Parakeet models have no detector, so this does nothing for them."
+                rgOptions={[
+                  { data: "", label: `Global (${ovr?.global?.vad ? "on" : "off"})` },
+                  { data: "on", label: "On" },
+                  { data: "off", label: "Off" },
+                ]}
+                selectedOption={curApp.vad === null ? "" : curApp.vad ? "on" : "off"}
+                onChange={(o) => applyOverride(curApp.appid, "vad", o.data === "" ? "" : o.data === "on")}
+              />
+            </PanelSectionRow>
+          </Drop>
+
+          <Drop
+            label="Manage this application"
+            summary={curApp.hidden ? "Hidden" : "Hide or remove the override"}
+            open={sub === "manage"}
+            onToggle={() => toggleSub("manage")}
+          >
+            {keyMsg[`override@${curApp.appid}`] && (
+              <PanelSectionRow>
+                <Field label="Note">{keyMsg[`override@${curApp.appid}`]}</Field>
+              </PanelSectionRow>
+            )}
+            <PanelSectionRow>
+              <ToggleField
+                label="Hide this application"
+                description="Takes it out of the Applications list. Its options keep applying when this app runs. You find it again with Show hidden."
+                checked={curApp.hidden}
+                onChange={async (on: boolean) => setOvr(await setAppHidden(curApp.appid, on))}
+              />
+            </PanelSectionRow>
             <PanelSectionRow>
               <ButtonItem
                 layout="below"
-                onClick={() => beginKeyCapture("activator", curApp.appid)}
-                description={keyMsg[`activator@${curApp.appid}`] || undefined}
+                onClick={async () => {
+                  if (!confirmRemove) { setConfirmRemove(true); return; }
+                  setConfirmRemove(false);
+                  const r = await removeOverride(curApp.appid);
+                  setOvr(r);
+                  setSelApp("");
+                }}
+                description={confirmRemove ? "Press again to confirm" : "Goes back to Global options for this app"}
               >
-                {curApp.activator_label ? "Change this app's activator" : "Record this app's activator"}
+                {confirmRemove ? "Confirm: remove override" : "Remove override"}
               </ButtonItem>
             </PanelSectionRow>
-          )}
-          {curApp.activator.length > 0 && (
-            <PanelSectionRow>
-              <ButtonItem layout="below" onClick={() => applyOverride(curApp.appid, "activator", "")}>
-                Clear (use Global)
-              </ButtonItem>
-            </PanelSectionRow>
-          )}
-          {curApp.activator_warnings.map((w) => (
-            <PanelSectionRow key={w}>
-              <Field label="Note">{w}</Field>
-            </PanelSectionRow>
-          ))}
-          <PanelSectionRow>
-            <DropdownItem
-              label="Model"
-              description="Which model transcribes this app."
-              rgOptions={[
-                { data: "", label: `Global (${ovr?.global?.model ?? "not set"})` },
-                ...models.map((m) => ({ data: m.name, label: m.installed ? m.name : `${m.name} - not downloaded` })),
-              ]}
-              selectedOption={curApp.model}
-              onChange={(o) => applyOverride(curApp.appid, "model", o.data as string)}
-            />
-          </PanelSectionRow>
-          {curApp.model && !curApp.model_installed && (
-            <PanelSectionRow>
-              <Field label="Note">
-                {curApp.model} is not downloaded. Download it in Models. Until then this app uses the global model.
-              </Field>
-            </PanelSectionRow>
-          )}
-          {curApp.model && curApp.model_installed && (
-            <PanelSectionRow>
-              <Field label="Model loaded" description="A loaded model is ready to use with no waiting. A model that is not loaded has to load first.">
-                {curApp.model_loaded ? `${curApp.model} is loaded` : `${curApp.model} is not loaded`}
-              </Field>
-            </PanelSectionRow>
-          )}
-          {!ovr?.keep_loaded && curApp.model && curApp.model !== (ovr?.global?.model ?? "") && !curApp.model_loaded && (
-            <PanelSectionRow>
-              <Field label="Note">
-                The first dictation in {curApp.name} waits a few seconds while {curApp.model} loads. Keep both models loaded (above) keeps it ready.
-              </Field>
-            </PanelSectionRow>
-          )}
-          <PanelSectionRow>
-            <DropdownItem
-              label="Typing speed"
-              description="How fast the keys are pressed in this app. Use Slow if this app drops letters."
-              rgOptions={[
-                { data: "", label: `Global (${ovr?.global?.speed ?? "normal"})` },
-                { data: "fast", label: "Fast" },
-                { data: "normal", label: "Normal" },
-                { data: "slow", label: "Slow" },
-              ]}
-              selectedOption={curApp.speed}
-              onChange={(o) => applyOverride(curApp.appid, "speed", o.data as string)}
-            />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <DropdownItem
-              label="Typing method"
-              description={
-                (curApp.method || ovr?.global?.method || "keyboard") === "steam"
-                  ? "Uses Steam's own keyboard. Gaming mode only; falls back to the virtual keyboard if Steam does not answer."
-                  : "A virtual keyboard created by the plugin. Works everywhere, including Steam's search box."
-              }
-              rgOptions={[
-                { data: "", label: `Global (${(ovr?.global?.method ?? "keyboard") === "steam" ? "Steam keyboard" : "virtual keyboard"})` },
-                { data: "keyboard", label: "Virtual keyboard (works everywhere)" },
-                { data: "steam", label: "Steam keyboard (gaming mode only)" },
-              ]}
-              selectedOption={curApp.method}
-              onChange={(o) => applyOverride(curApp.appid, "method", o.data as string)}
-            />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <DropdownItem
-              label="Spoken symbols"
-              description={
-                (curApp.symbols === "symbols" ? "Saying \"backslash\" types \\ " : "Saying \"backslash\" types the word backslash.") +
-                " All the symbols: forward slash, underscore, at sign, hyphen, open/close parenthesis, bracket and brace, semicolon, ampersand, asterisk, plus sign, equals sign, dollar sign, percent sign, hashtag, tilde, caret, vertical bar, backtick."
-              }
-              rgOptions={[
-                { data: "", label: `Global (${(ovr?.global?.symbols ?? "words") === "symbols" ? "symbol" : "word"})` },
-                { data: "words", label: "Type the word (backslash)" },
-                { data: "symbols", label: "Type the symbol (\\)" },
-              ]}
-              selectedOption={curApp.symbols}
-              onChange={async (o) => setOvr(await setOverrideSymbols(curApp.appid, o.data as string))}
-            />
-          </PanelSectionRow>
-          {keyActionRows("before", "Press before typing", "Pressed first, then the text is typed. Enter opens a chat box in most games.", curApp.appid)}
-          {keyActionRows("after", "Press after typing", "Pressed once the text is typed. Enter sends it.", curApp.appid)}
-          <PanelSectionRow>
-            <DropdownItem
-              label="Rumble"
-              description="One short buzz when recording starts, two when it stops. Off means no rumble in this app, even when Global has it on."
-              rgOptions={[
-                { data: "", label: `Global (${ovr?.global?.rumble ? "on" : "off"})` },
-                { data: "on", label: "On" },
-                { data: "off", label: "Off" },
-              ]}
-              selectedOption={curApp.rumble === null ? "" : curApp.rumble ? "on" : "off"}
-              onChange={(o) => applyOverride(curApp.appid, "rumble", o.data === "" ? "" : o.data === "on")}
-            />
-          </PanelSectionRow>
-          {(curApp.rumble === true || (curApp.rumble === null && ovr?.global?.rumble)) && (
-            <PanelSectionRow>
-              <DropdownItem
-                label="Intensity"
-                description="How strong the buzz is in this app. 1 is the lightest, 10 the strongest."
-                rgOptions={[
-                  { data: "", label: `Global (${ovr?.global?.rumble_level ?? 3})` },
-                  ...[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => ({ data: String(n), label: String(n) })),
-                ]}
-                selectedOption={curApp.rumble_level === null ? "" : String(curApp.rumble_level)}
-                onChange={(o) => applyOverride(curApp.appid, "rumble_level", o.data === "" ? "" : Number(o.data))}
-              />
-            </PanelSectionRow>
-          )}
-          <PanelSectionRow>
-            <DropdownItem
-              label="Voice detector"
-              description="Skips noise and silence so they are not typed as stray words. Turn it off if it ever cuts off a quiet word. Parakeet models have no detector, so this does nothing for them."
-              rgOptions={[
-                { data: "", label: `Global (${ovr?.global?.vad ? "on" : "off"})` },
-                { data: "on", label: "On" },
-                { data: "off", label: "Off" },
-              ]}
-              selectedOption={curApp.vad === null ? "" : curApp.vad ? "on" : "off"}
-              onChange={(o) => applyOverride(curApp.appid, "vad", o.data === "" ? "" : o.data === "on")}
-            />
-          </PanelSectionRow>
-          {keyMsg[`override@${curApp.appid}`] && (
-            <PanelSectionRow>
-              <Field label="Note">{keyMsg[`override@${curApp.appid}`]}</Field>
-            </PanelSectionRow>
-          )}
-          <PanelSectionRow>
-            <ToggleField
-              label="Hide this application"
-              description="Takes it out of the Applications dropdown. Its options above keep applying when this app runs. You find it again with Show hidden."
-              checked={curApp.hidden}
-              onChange={async (on: boolean) => setOvr(await setAppHidden(curApp.appid, on))}
-            />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ButtonItem
-              layout="below"
-              onClick={async () => {
-                if (!confirmRemove) { setConfirmRemove(true); return; }
-                setConfirmRemove(false);
-                const r = await removeOverride(curApp.appid);
-                setOvr(r);
-                setSelApp("");
-              }}
-              description={confirmRemove ? "Press again to confirm" : "Goes back to Global options for this app"}
-            >
-              {confirmRemove ? "Confirm: remove override" : "Remove override"}
-            </ButtonItem>
-          </PanelSectionRow>
-        </PanelSection>
+          </Drop>
+        </>
       )}
         </>
       )}
 
-      <GroupHeader label="Models" summary={active || "No model yet"} open={open === "models"} onToggle={() => toggleGroup("models")} />
+      <GroupHeader label="Download models" summary={`${downloaded.length} downloaded`} open={open === "models"} onToggle={() => toggleGroup("models")} />
       {open === "models" && (
         <>
-      <PanelSection title="Current model">
-        {downloaded.length > 0 ? (
-          <PanelSectionRow>
-            <DropdownItem
-              label="Model"
-              description={activeInfo?.description ?? "Pick one of your downloaded models"}
-              rgOptions={downloaded.map((m) => ({ data: m.name, label: m.name }))}
-              selectedOption={ready ? active : undefined}
-              strDefaultLabel="Select a model"
-              onChange={(o) => useModel(o.data as string)}
-            />
-          </PanelSectionRow>
-        ) : (
-          <PanelSectionRow>
-            <Field label="No model yet" description="Download one under Choose a model, then select it here" />
-          </PanelSectionRow>
-        )}
-        {downloaded.length > 0 && ready && (
-          <PanelSectionRow>
-            <ToggleField
-              label="Voice detector"
-              description="Skips noise and silence so they aren't typed as stray words. Turn it off if it ever cuts off a quiet word. Remembered for each model."
-              checked={vadOn}
-              onChange={async (on: boolean) => {
-                setVadOn(on);
-                await setVad(on);
-                await refresh();
-              }}
-            />
-          </PanelSectionRow>
-        )}
-      </PanelSection>
-
       <PanelSection title="Choose a model">
         <PanelSectionRow>
           <DropdownItem

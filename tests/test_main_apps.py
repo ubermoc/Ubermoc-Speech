@@ -392,6 +392,7 @@ class Backend(Fixtures):
                                       "hidden": False})
         self.assertEqual(out["global"], {"activator_label": "Left Ctrl + F9",
                                          "speed": "normal", "model": "small.en",
+                                         "secondary_model": "", "secondary_installed": False,
                                          "symbols": "words", "method": "keyboard",
                                          "rumble": True, "rumble_level": 3, "vad": True,
                                          "vad_supported": True})

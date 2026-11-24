@@ -169,6 +169,31 @@ class Choosing(unittest.TestCase):
         have = installed(["small.en", "large-v3"])
         self.assertEqual(ua.model_for(ov, "small.en", have), "large-v3")
 
+    def test_an_app_set_to_the_secondary_model_uses_it_when_it_is_downloaded(self):
+        ov = ut.normalize_overrides({"570": {"name": "Dota 2", "use_secondary": True}})["570"]
+        have = installed(["small.en", "large-v3"])
+        self.assertEqual(ua.model_for(ov, "small.en", have, "large-v3"), "large-v3")
+
+    def test_an_app_not_set_to_the_secondary_uses_the_main_model(self):
+        ov = ut.normalize_overrides({"570": {"name": "Dota 2", "use_secondary": False}})["570"]
+        have = installed(["small.en", "large-v3"])
+        self.assertEqual(ua.model_for(ov, "small.en", have, "large-v3"), "small.en")
+        self.assertEqual(ua.model_for(None, "small.en", have, "large-v3"), "small.en")
+
+    def test_a_missing_secondary_model_falls_back_to_the_main_model(self):
+        ov = ut.normalize_overrides({"570": {"name": "Dota 2", "use_secondary": True}})["570"]
+        self.assertEqual(ua.model_for(ov, "small.en", installed(["small.en"]), "large-v3"), "small.en")
+        self.assertEqual(ua.model_for(ov, "small.en", installed(["small.en"]), ""), "small.en")
+        self.assertEqual(ua.model_for(ov, "small.en", installed(["small.en"])), "small.en")
+
+    def test_use_secondary_is_a_real_bool_only_and_can_be_set_and_cleared(self):
+        self.assertNotIn("use_secondary", ut.normalize_overrides({"570": {"name": "Dota 2", "use_secondary": "true"}})["570"])
+        ov = ut.normalize_overrides({"570": {"name": "Dota 2"}})
+        ov = ua.set_field(ov, "570", "use_secondary", True)
+        self.assertTrue(ov["570"]["use_secondary"])
+        ov = ua.set_field(ov, "570", "use_secondary", "")
+        self.assertNotIn("use_secondary", ov["570"])
+
     def test_nothing_downloaded_at_all_gives_no_model(self):
         ov = ut.normalize_overrides({"570": {"name": "Dota 2", "model": "large-v3"}})["570"]
         self.assertEqual(ua.model_for(ov, NO_MODEL, installed([])), NO_MODEL)
@@ -230,7 +255,7 @@ class NewPerAppFields(unittest.TestCase):
     def test_the_panel_can_set_every_field_in_FIELDS(self):
         # the panel uses one callable for all of them, so every field it shows must be accepted here
         self.assertEqual(sorted(ua.FIELDS),
-                         ["activator", "method", "model", "rumble", "rumble_level", "speed", "symbols", "vad"])
+                         ["activator", "method", "model", "rumble", "rumble_level", "speed", "symbols", "use_secondary", "vad"])
 
     def test_the_method_is_the_app_s_when_it_is_set(self):
         ov = {"method": "steam"}

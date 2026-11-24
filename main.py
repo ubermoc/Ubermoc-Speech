@@ -216,6 +216,20 @@ class Plugin:
             "models": ubermoc_models.visible_models(self._model_ok),
         }
 
+    def _secondary(self) -> str:
+        """The Secondary model from Global options: a known model name, or "" when none is chosen."""
+        name = self._load_settings().get("secondary_model")
+        return name if isinstance(name, str) and name in MODELS else ""
+
+    async def set_secondary_model(self, name: str) -> dict:
+        """Choose the Secondary model (a downloaded one), or "" for none. Apps set to use it dictate with it."""
+        name = name or ""
+        if name and (name not in MODELS or not self._model_ok(name)):
+            return {**await Plugin.get_overrides(self), "ok": False, "error": "model is not downloaded"}
+        self._save_settings(secondary_model=name)
+        await Plugin.stop_server(self)  # restarts with the right models on next use
+        return {**await Plugin.get_overrides(self), "ok": True}
+
     async def set_model(self, name: str) -> dict:
         if name not in MODELS or not self._model_ok(name):
             return {"ok": False, "error": "model is not downloaded"}
@@ -460,7 +474,7 @@ class Plugin:
             if (self.running_app or {}).get("t", 0) != seen:
                 break
             await asyncio.sleep(0.02)
-        model = ubermoc_apps.model_for(self._app_override(), self._selected(), self._model_ok)
+        model = ubermoc_apps.model_for(self._app_override(), self._selected(), self._model_ok, self._secondary())
         if not model:
             return {"ok": False, "error": "no model selected; download one and select it first"}
         self.rec_model = model
@@ -777,7 +791,7 @@ class Plugin:
             if ubermoc_apps.flag_of(s.get("keep_loaded")):
                 # "Keep both models loaded": bring this app's model up now so the first dictation
                 # in the app is instant, not after a model load
-                model = ubermoc_apps.model_for(self._app_override(), self._selected(), self._model_ok)
+                model = ubermoc_apps.model_for(self._app_override(), self._selected(), self._model_ok, self._secondary())
                 if model and not self._slot_of(model):
                     asyncio.ensure_future(self.start_server(model))
         return True
@@ -802,7 +816,7 @@ class Plugin:
         glob_model = self._selected()
         hidden = ubermoc_apps.normalize_hidden(s.get("hidden"))
         loaded = self.loaded_models()
-        model = ubermoc_apps.model_for(overrides.get(running), glob_model, self._model_ok)
+        model = ubermoc_apps.model_for(overrides.get(running), glob_model, self._model_ok, self._secondary())
         return {
             "overrides": [
                 {"appid": appid, "name": ov["name"], "kind": ov["kind"],
@@ -811,6 +825,7 @@ class Plugin:
                  "activator": ov.get("activator") or [],
                  "activator_label": ubermoc_input.describe(ov["activator"]) if ov.get("activator") else "",
                  "activator_warnings": ubermoc_input.warnings_for(ov["activator"]) if ov.get("activator") else [],
+                 "use_secondary": bool(ov.get("use_secondary")),
                  "model": ov.get("model") or "",
                  "model_installed": bool(self._model_ok(ov["model"])) if ov.get("model") else False,
                  "model_loaded": bool(self._slot_of(ov["model"])) if ov.get("model") else False,
@@ -826,6 +841,8 @@ class Plugin:
             "global": {"activator_label": ubermoc_input.describe(glob_act),
                        "speed": ubermoc_apps.speed_for(None, s.get("type_speed")),
                        "model": glob_model,
+                       "secondary_model": self._secondary(),
+                       "secondary_installed": bool(self._secondary() and self._model_ok(self._secondary())),
                        "symbols": glob_symbols,
                        "method": ubermoc_apps.method_for(None, s.get("type_method")),
                        "rumble": ubermoc_apps.rumble_for(None, s.get("rumble")),

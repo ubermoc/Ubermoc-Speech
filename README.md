@@ -10,9 +10,9 @@ automatically), and the plugin scores every model on your own voice and tells yo
 
 The panel opens as five collapsible groups (one open at a time), with the update
 section always visible at the bottom, followed by **Downloads: more Uber apps for game mode** (a list of Uber Watch, Uber Watch for the desktop and the Ubermoc Warcraft Mod Updater, each opening its GitHub page):
-- **Global options**: the activator, rumble (one buzz when recording starts, two when it stops, on any controller that can rumble; with a ten-step intensity slider; can be turned off), what is pressed around the typed text, and Typing settings (spoken symbols, method, speed)
-- **Applications overrides**: one Applications dropdown (Steam games first, then non-Steam apps) - pick an app and set its own activator, model, typing speed, typing method, spoken symbols, before / after keys, rumble on/off, intensity and voice detector, each defaulting to Global. Has a Hide toggle per app, a Show hidden switch, and a Keep both models loaded switch
-- **Models**: Current model, Choose a model (download / delete)
+- **Global options**: six drop-downs in the same format and wording as the per-application ones, one open at a time, each showing its current choice when closed: **Models** (what is loaded now in grey, the Main model, a Secondary model, and the Keep both models loaded switch; the secondary model is chosen only here), **Activator**, **Typing** (speed, method, spoken symbols), **Press keys around the text**, **Rumble** (on or off, intensity 1 to 10) and **Voice detector**
+- **Applications overrides**: every part is its own drop-down, one open at a time. **Applications** comes first (the running app, the list of Steam games then non-Steam apps, and the Show hidden switch with its Hidden applications list). Once you pick an app, drop-downs for it follow below, each showing its current choice when closed: **Models** (what is loaded now in grey, the main and secondary model from Global options, and a choice of which of the two this app uses), **Activator**, **Typing** (speed, method, spoken symbols), **Press keys around the text**, **Rumble** (on/off, intensity), **Voice detector** and **Manage this application** (hide, remove override). Everything defaults to Global.
+- **Download models**: choose a model, download or delete it
 - **Voice test**: find the best model for your voice (see below)
 - **Testing**: record a test, see the text, test typing
 - **Updates** (always shown): installs the latest GitHub release
@@ -35,7 +35,7 @@ sudo systemctl restart plugin_loader
 After that, use the Update button in the panel. It swaps the new files in without restarting Decky or Steam; then open Decky's plugin list (gear icon) and choose Reload for Ubermoc Speech to start using the new version.
 
 ## Models
-Every model is available. Pick one, press Download, then select it under Current model. Models are kept in
+Every model is available. Pick one, press Download, then select it as the Main model under Global options, Models. Models are kept in
 `~/.local/share/ubermoc-speech/models` and never re-downloaded. Only a downloaded model can be current.
 The panel lists the two recommended models first, then the rest. Each description gives the languages, a
 relative accuracy tier, speed and memory in one line, and for the ten models we tested it adds our measured
@@ -180,10 +180,10 @@ in games).
   open. Nothing is pressed when there is nothing to type.
 
 ### Per-application overrides
-The **Applications overrides** group has one *Applications* dropdown. Steam games come first, then
+The **Applications overrides** group is a stack of drop-downs, one open at a time; the first is *Applications*. Its list shows Steam games first, then
 apps added to your Steam library as non-Steam shortcuts, each labelled by its category and
 alphabetical inside it. Choosing an app adds an override for it, starting from a copy of the Global
-options' before / after and Spoken symbols; its own section opens below. Remove the override to go
+options' before / after and Spoken symbols; the list closes and the app's own drop-downs (Models, Activator, Typing and the rest) appear below it. Remove the override to go
 back to Global options for that app.
 
 The running game is read from the Steam interface (`Router.MainRunningApp`) and reported to
@@ -194,8 +194,8 @@ options always apply. The non-Steam list is whatever Steam has as shortcut-type 
 it can include things like remote-play shortcuts.
 
 **Hiding an application** takes it out of the Applications dropdown. Its override keeps applying
-when that app runs - hiding is only a panel preference. The *Show hidden* switch at the bottom opens
-a *Hidden applications* dropdown, where you can edit a hidden app and unhide it.
+when that app runs - hiding is only a panel preference. The *Show hidden* switch, inside the Applications drop-down, opens
+a *Hidden applications* list, where you can edit a hidden app and unhide it.
 
 Every option in Global options can be set for one app. Each is optional: when it is not set the app
 follows the Global setting (the row shows `Global (…)`), and a settings file saved before these
@@ -206,14 +206,16 @@ existed loads unchanged.
   The panel shows what is set, for example `R2 + Guide held together` or `Global (Guide held)`. A
   per-app activator can only be used in a game: Steam reports the running app in gaming mode only,
   so in desktop mode, and for an app that is not running, the global activator is the one in effect.
-- **Model** - which model transcribes this app's dictation: *Global*, or any model in the model list
-  (one that is not downloaded is marked, and dictation keeps using the global model until it is
-  downloaded). The panel says whether that model is loaded now, and warns that the first dictation
-  in the app waits a few seconds while it loads. With **Keep both models loaded** on, the global
-  model and the app's own model run side by side on two ports, so switching between apps is instant
-  and nothing waits; the panel lists which models are loaded. It costs about 90 MB per model. With
-  the switch off there is one model at a time, and a dictation in an app with a different model
-  waits for the load.
+- **Model** - which of the two models from Global options transcribes this app: the **Main
+  model** or the **Secondary model** (the secondary model is chosen only in Global options, under
+  Models; with none chosen the app uses the main model). If the secondary model is deleted the app
+  falls back to the main one, and uses the secondary again once it is downloaded. The panel lists
+  which models are loaded now and warns that the first dictation in an app that uses the secondary
+  model waits a few seconds while it loads. With **Keep both models loaded** on (also in Global
+  options), the main and the secondary model run side by side on two ports, so switching between
+  apps is instant and nothing waits. It costs about 90 MB per model. With the switch off there is
+  one model at a time. An app that was given its own model before the secondary model moved to
+  Global options keeps that model until you pick Main or Secondary for it.
 - **Typing speed** - **Fast**, **Normal**, **Slow**, or **Global**. Use Slow for a game that drops
   letters and Fast for a chat box that keeps up. Only the key hold times change.
 - **Typing method** - the virtual keyboard the plugin makes (works everywhere, including Steam's

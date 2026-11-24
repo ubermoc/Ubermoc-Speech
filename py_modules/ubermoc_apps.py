@@ -27,7 +27,7 @@ DEFAULT_METHOD = "keyboard"
 LEVEL_MIN, LEVEL_MAX = 1, 10
 # Every field the panel can set for one application. `before` / `after` go through
 # set_key_action, so they are not in this list.
-FIELDS = ("activator", "model", "speed", "symbols", "method", "rumble", "rumble_level", "vad")
+FIELDS = ("activator", "model", "use_secondary", "speed", "symbols", "method", "rumble", "rumble_level", "vad")
 
 
 def normalize_extra(entry) -> dict:
@@ -46,6 +46,9 @@ def normalize_extra(entry) -> dict:
     model = entry.get("model")
     if isinstance(model, str) and model in MODELS:
         out["model"] = model
+    use_secondary = entry.get("use_secondary")
+    if isinstance(use_secondary, bool):
+        out["use_secondary"] = use_secondary
     speed = entry.get("speed")
     if isinstance(speed, str) and speed in SPEEDS:
         out["speed"] = speed
@@ -88,6 +91,10 @@ def set_field(overrides: dict, appid: str, field: str, value) -> dict:
         entry.pop("model", None)
         if isinstance(value, str) and value in MODELS:
             entry["model"] = value
+    elif field == "use_secondary":
+        entry.pop("use_secondary", None)
+        if isinstance(value, bool):
+            entry["use_secondary"] = value
     elif field == "speed":
         entry.pop("speed", None)
         if isinstance(value, str) and value in SPEEDS:
@@ -132,14 +139,17 @@ def speed_for(override, global_speed) -> str:
     return global_speed if global_speed in SPEEDS else DEFAULT_SPEED
 
 
-def model_for(override, global_model, is_installed) -> str:
-    """The model to use for this app: its own model when it is downloaded, else the global one.
+def model_for(override, global_model, is_installed, secondary="") -> str:
+    """The model to use for this app: the Secondary model when the app is set to use it, else the main (global) one.
 
-    Checked every time, not stored: deleting the app's model makes it fall back to the global
-    model, and re-downloading makes the app use it again with no setting to fix."""
+    Checked every time, not stored: deleting the secondary model makes the app fall back to the main
+    model, and re-downloading makes it use the secondary again with no setting to fix. An override that
+    still carries an older per-app model (before the secondary model was global) keeps using that model."""
     name = (override or {}).get("model")
     if isinstance(name, str) and name in MODELS and is_installed(name):
         return name
+    if (override or {}).get("use_secondary") and isinstance(secondary, str) and secondary in MODELS and is_installed(secondary):
+        return secondary
     return global_model
 
 
