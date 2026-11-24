@@ -9,7 +9,7 @@ It also has a **Voice test**: pick the models you want to compare, read 22 short
 automatically), and the plugin scores every model on your own voice and tells you which is best for you.
 
 The panel opens as five collapsible groups (one open at a time), with the update
-section always visible at the bottom:
+section always visible at the bottom, followed by **Downloads: more Uber apps for game mode** (a list of Uber Watch, Uber Watch for the desktop and the Ubermoc Warcraft Mod Updater, each opening its GitHub page):
 - **Global options**: the activator, rumble (one buzz when recording starts, two when it stops, on any controller that can rumble; with a ten-step intensity slider; can be turned off), what is pressed around the typed text, and Typing settings (spoken symbols, method, speed)
 - **Applications**: different before / after inputs for specific Steam and non-Steam apps
 - **Models**: Current model, Choose a model (download / delete)

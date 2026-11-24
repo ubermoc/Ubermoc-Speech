@@ -18,6 +18,7 @@ import {
 } from "@decky/ui";
 import { Component, ReactNode, useEffect, useRef, useState } from "react";
 import { FaMicrophone } from "react-icons/fa";
+import { MoreApps } from "./MoreApps";
 import { VoiceTest } from "./voicetest";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1123,6 +1124,7 @@ function Panel() {
           </PanelSectionRow>
         )}
       </PanelSection>
+      <MoreApps self="https://github.com/ubermoc/Ubermoc-Speech" />
     </>
   );
 }
