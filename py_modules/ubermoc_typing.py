@@ -29,6 +29,7 @@ import struct
 import subprocess
 import time
 
+import ubermoc_apps
 from ubermoc_codes import KEY_NAMES
 from ubermoc_input import (
     MODIFIER_CODES,
@@ -256,6 +257,7 @@ def normalize_overrides(raw) -> dict:
         }
         if entry.get("symbols") in ("words", "symbols"):
             out[appid]["symbols"] = entry["symbols"]     # absent = follows the global option
+        out[appid].update(ubermoc_apps.normalize_extra(entry))   # activator / model / speed, absent = follows Global
         if len(out) >= MAX_OVERRIDES:
             break
     return out

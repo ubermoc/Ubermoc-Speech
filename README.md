@@ -11,7 +11,7 @@ automatically), and the plugin scores every model on your own voice and tells yo
 The panel opens as five collapsible groups (one open at a time), with the update
 section always visible at the bottom, followed by **Downloads: more Uber apps for game mode** (a list of Uber Watch, Uber Watch for the desktop and the Ubermoc Warcraft Mod Updater, each opening its GitHub page):
 - **Global options**: the activator, rumble (one buzz when recording starts, two when it stops, on any controller that can rumble; with a ten-step intensity slider; can be turned off), what is pressed around the typed text, and Typing settings (spoken symbols, method, speed)
-- **Applications**: different before / after inputs for specific Steam and non-Steam apps
+- **Applications overrides**: one Applications dropdown (Steam games first, then non-Steam apps) - pick an app and set its own activator, model, typing speed, typing method, spoken symbols, before / after keys, rumble on/off, intensity and voice detector, each defaulting to Global. Has a Hide toggle per app, a Show hidden switch, and a Keep both models loaded switch
 - **Models**: Current model, Choose a model (download / delete)
 - **Voice test**: find the best model for your voice (see below)
 - **Testing**: record a test, see the text, test typing
@@ -180,17 +180,55 @@ in games).
   open. Nothing is pressed when there is nothing to type.
 
 ### Per-application overrides
-The **Applications** group has a *Steam applications* list (installed games) and a *Non-Steam
-applications* list (shortcuts in your Steam library). Choosing one adds an override for it,
-starting from a copy of the Global options' before / after and Spoken symbols; edit them with the same None /
-Enter / Any key or combination controls, or remove the override to go back to Global options. Each override also has its own *Spoken symbols* choice (type the word or the symbol); an override saved before this existed follows the Global option.
+The **Applications overrides** group has one *Applications* dropdown. Steam games come first, then
+apps added to your Steam library as non-Steam shortcuts, each labelled by its category and
+alphabetical inside it. Choosing an app adds an override for it, starting from a copy of the Global
+options' before / after and Spoken symbols; its own section opens below. Remove the override to go
+back to Global options for that app.
 
 The running game is read from the Steam interface (`Router.MainRunningApp`) and reported to
-the backend when Steam announces an app starting or stopping, and each time you start dictating (no polling). The running app's override is used if
-it has one, otherwise Global options. This works in
+the backend when Steam announces an app starting or stopping, and each time you start dictating (no
+polling). The running app's override is used if it has one, otherwise Global options. This works in
 gaming mode, where Steam knows what is running; in desktop mode (no Steam interface) Global
 options always apply. The non-Steam list is whatever Steam has as shortcut-type entries, so
 it can include things like remote-play shortcuts.
+
+**Hiding an application** takes it out of the Applications dropdown. Its override keeps applying
+when that app runs - hiding is only a panel preference. The *Show hidden* switch at the bottom opens
+a *Hidden applications* dropdown, where you can edit a hidden app and unhide it.
+
+Every option in Global options can be set for one app. Each is optional: when it is not set the app
+follows the Global setting (the row shows `Global (…)`), and a settings file saved before these
+existed loads unchanged.
+
+- **Activator** - the button that starts dictation in this app. *Record this app's activator*
+  listens for 15 seconds, *Change* records a new one, *Clear* goes back to the global activator.
+  The panel shows what is set, for example `R2 + Guide held together` or `Global (Guide held)`. A
+  per-app activator can only be used in a game: Steam reports the running app in gaming mode only,
+  so in desktop mode, and for an app that is not running, the global activator is the one in effect.
+- **Model** - which model transcribes this app's dictation: *Global*, or any model in the model list
+  (one that is not downloaded is marked, and dictation keeps using the global model until it is
+  downloaded). The panel says whether that model is loaded now, and warns that the first dictation
+  in the app waits a few seconds while it loads. With **Keep both models loaded** on, the global
+  model and the app's own model run side by side on two ports, so switching between apps is instant
+  and nothing waits; the panel lists which models are loaded. It costs about 90 MB per model. With
+  the switch off there is one model at a time, and a dictation in an app with a different model
+  waits for the load.
+- **Typing speed** - **Fast**, **Normal**, **Slow**, or **Global**. Use Slow for a game that drops
+  letters and Fast for a chat box that keeps up. Only the key hold times change.
+- **Typing method** - the virtual keyboard the plugin makes (works everywhere, including Steam's
+  search box), Steam's own keyboard (gaming mode only, falls back to the virtual keyboard if Steam
+  does not answer), or **Global**.
+- **Spoken symbols** - saying "backslash" types `\` or the word backslash, per app.
+- **Press before typing / Press after typing** - the same None / Enter / Any key or combination
+  controls as Global options, for this app alone.
+- **Rumble** - **On**, **Off** or **Global**. Off means no buzz in this app even when Global has
+  rumble on.
+- **Intensity** - 1 (lightest) to 10 (strongest), or **Global**.
+- **Voice detector** - **On**, **Off** or **Global**. The detector is chosen when the speech server
+  starts, so changing it restarts the server that runs that model. Parakeet models have no
+  detector, so this does nothing for them.
+- **Hide this application** - takes it out of the Applications dropdown (see above).
 
 ## Settings
 Model, activator, typing and before/after inputs are written to two places, atomically and

@@ -28,6 +28,7 @@ import decky  # provided by Decky Loader
 # Decky already puts <plugin>/py_modules on sys.path; do it explicitly as well.
 sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 import ubermoc_input  # noqa: E402
+import ubermoc_apps  # noqa: E402
 import ubermoc_audio  # noqa: E402
 import ubermoc_models  # noqa: E402
 import ubermoc_rumble  # noqa: E402
@@ -37,6 +38,9 @@ import ubermoc_voicetest  # noqa: E402
 
 HOST = "127.0.0.1"
 PORT = 8178
+# The second speech server runs on the port next to the first. Both binaries take
+# `--host` and `--port` (C11, C12) and two of them run at the same time (C13).
+EXTRA_PORT = 8179
 REPO = "ubermoc/Ubermoc-Speech"
 VAD_MODEL = "ggml-silero-v6.2.0.bin"
 PLUGIN_NAME = "Ubermoc Speech"
@@ -71,6 +75,12 @@ def _ssl_context() -> ssl.SSLContext:
 class Plugin:
     server_proc: subprocess.Popen | None = None
     server_model: str = ""       # the model the running server was started with
+    server_vad: bool = False      # the voice detector the primary server was started with
+    # the second server, used when "Keep both models loaded" is on: the global model stays
+    # in the primary slot and an app's own model goes in this one, so switching apps is instant
+    extra_proc: subprocess.Popen | None = None
+    extra_model: str = ""
+    extra_vad: bool = False
     server_task: "asyncio.Future | None" = None
     record_proc: subprocess.Popen | None = None
     record_path: str | None = None
@@ -80,6 +90,7 @@ class Plugin:
     phase: str = "idle"            # idle | starting | recording | transcribing
     last_result: dict | None = None
     by_activator: bool = False
+    rec_model: str = ""            # the model the current dictation is transcribing with
     act_down: bool = False
     hub = None
     keyboard = None                # the virtual keyboard, created on first use
@@ -160,21 +171,34 @@ class Plugin:
         """The model in use. Always a downloaded one, or "" if none is."""
         return ubermoc_models.choose_model(self._load_settings().get("model"), self._model_ok)
 
+    def _app_override(self) -> dict:
+        """The override of the app running now, or None if it has none."""
+        return ubermoc_typing.normalize_overrides(self._load_settings().get("overrides")).get(self._running_appid())
+
+    def _apply_activator(self):
+        """Arm the activator that applies to the app running now: its own combination, or the
+        global one. A recording in progress keeps its own activator - the change is picked up
+        by the next dictation, so arming never disturbs the one running."""
+        if self.phase == "recording" and self.by_activator:
+            return
+        tokens = ubermoc_apps.activator_for(self._app_override(), self._load_settings().get("activator"))
+        if self.hub and tokens != self.hub.activator:
+            self.hub.set_activator(tokens)
+
     def _user_uid(self) -> int:
         try:
             return os.stat(getattr(decky, "DECKY_USER_HOME", "/home/deck")).st_uid
         except OSError:
             return 1000
 
-    def _vad_on(self, name: str) -> bool:
-        """Whether the voice detector is used with this model. It is on unless the user
-        turned it off for that model."""
+    def _vad_on(self, name: str, override: dict | None = None) -> bool:
+        """Whether the voice detector is used with this model in this app: the app's own switch
+        wins, otherwise the global choice for that model (on unless it was turned off for it)."""
         if not ubermoc_models.vad_supported(name):
             return False           # Parakeet has no voice detector switch (it returns nothing for silence)
         chosen = self._load_settings().get("vad")
-        if isinstance(chosen, dict) and isinstance(chosen.get(name), bool):
-            return chosen[name]
-        return True
+        global_on = chosen[name] if isinstance(chosen, dict) and isinstance(chosen.get(name), bool) else True
+        return ubermoc_apps.vad_for(override, global_on)
 
     @staticmethod
     def _vad_threshold(name: str) -> str:
@@ -271,8 +295,13 @@ class Plugin:
         if name == self._selected() and self.record_proc and self.record_proc.poll() is None:
             return {"ok": False, "error": "stop recording first"}
         was_current = name == self._selected()
-        if was_current:
-            await Plugin.stop_server(self)  # release the model file
+        if was_current or self._slot_of(name):
+            # release the model file: it may be the current model, or the model of an
+            # application that has it loaded in the second slot. Any app that used it falls back
+            # to Global.
+            self._stop_model_slot(name)
+            if was_current:
+                self._stop_slot("primary")
         for path in (self._model_path(name), self._model_path(name) + ".part"):
             try:
                 os.remove(path)
@@ -298,13 +327,75 @@ class Plugin:
         }
 
     # ---------- speech server (whisper.cpp or parakeet.cpp) ----------
+    def _alive(self, proc) -> bool:
+        return bool(proc and proc.poll() is None)
+
+    def _slot_of(self, name: str) -> str:
+        """Which speech server runs `name`: "primary", "extra", or "" when none does."""
+        if name and name == self.server_model:
+            return "primary"
+        if name and name == self.extra_model:
+            return "extra"
+        return ""
+
+    def _slot_proc(self, slot: str):
+        return self.server_proc if slot == "primary" else self.extra_proc
+
+    def _stop_slot(self, slot: str):
+        """Terminate one speech server; the other slot keeps its model loaded."""
+        proc = self._slot_proc(slot)
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        if slot == "primary":
+            self.server_proc, self.server_model, self.server_vad = None, "", False
+            self.server_task = None
+        else:
+            self.extra_proc, self.extra_model, self.extra_vad = None, "", False
+
+    def _port_for(self, name: str) -> int:
+        """The port the transcription request for `name` goes to."""
+        return EXTRA_PORT if self._slot_of(name) == "extra" else PORT
+
+    def loaded_models(self) -> list:
+        """The models whose speech server is up right now (what the panel shows)."""
+        return [m for m in (self.server_model, self.extra_model) if m and self._alive(self._slot_proc(self._slot_of(m)))]
+
     async def start_server(self, name: str = "") -> dict:
-        """Start the speech server for `name` (default: the selected model). Used by dictation and by the voice test."""
+        """Start the speech server for `name` (default: the selected model). Used by dictation and by the voice test.
+
+        With "Keep both models loaded" on, the global model lives in the primary slot and an
+        app's own model in the second, so switching between two apps costs nothing. A slot is
+        restarted only when it holds a different model, or was started with a voice detector
+        setting this app does not want. With the switch off there is one server, as before.
+        """
         name = name or self._selected()
-        if self.server_proc and self.server_proc.poll() is None:
-            if not name or name == self.server_model:
+        keep = ubermoc_apps.flag_of(self._load_settings().get("keep_loaded"))
+        glob = self._selected()
+        vad = self._vad_on(name, self._app_override())
+        if not keep:
+            self._stop_slot("extra")        # one server only
+        # the global model lives in the primary slot; a model an app picked for itself goes in
+        # the second slot, and only when the switch keeps two models loaded
+        slot = "extra" if (keep and glob and name != glob) else "primary"
+        running = self._slot_of(name)
+        if running and self._alive(self._slot_proc(running)):
+            same = self.server_vad if running == "primary" else self.extra_vad
+            if running == slot and same == vad:
                 return {"ok": True}
-            await Plugin.stop_server(self)       # a different model is wanted: restart with it
+        self._stop_slot(slot)              # free the slot that must run this model
+        r = await Plugin._start_one(self, name, slot, vad)
+        if r.get("ok") and keep and slot == "extra" and not self._alive(self.server_proc):
+            # bring the global model up alongside, in the background, so going back to an app
+            # that uses it is instant
+            asyncio.ensure_future(Plugin._start_one(self, glob, "primary", self._vad_on(glob, self._app_override())))
+        return r
+
+    async def _start_one(self, name: str, slot: str, vad: bool) -> dict:
+        """Start one speech server for `name` on its slot's port, and wait until it answers."""
         if not name:
             return {"ok": False, "error": "no model selected; download one and select it first"}
         bname = ubermoc_models.binary_name(name)
@@ -312,39 +403,42 @@ class Plugin:
         if not os.path.exists(binary):
             return {"ok": False, "error": f"{bname} binary missing"}
         os.chmod(binary, 0o755)
+        port = PORT if slot == "primary" else EXTRA_PORT
         env = {**os.environ, "LD_LIBRARY_PATH": os.path.dirname(binary)}
-        vad = os.path.join(os.path.dirname(binary), VAD_MODEL)
+        vadpath = os.path.join(os.path.dirname(binary), VAD_MODEL)
         cmd = ubermoc_models.server_command(
-            name, binary, self._model_path(name), HOST, PORT, min(4, os.cpu_count() or 4),
-            vad_model=vad if os.path.exists(vad) else "", vad_on=self._vad_on(name),
+            name, binary, self._model_path(name), HOST, port, min(4, os.cpu_count() or 4),
+            vad_model=vadpath if os.path.exists(vadpath) else "", vad_on=vad,
             vad_threshold=Plugin._vad_threshold(name))
         os.makedirs(decky.DECKY_PLUGIN_LOG_DIR, exist_ok=True)
-        log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, f"{bname}.log"), "ab")
-        self.server_proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
-        self.server_model = name
+        log = open(os.path.join(decky.DECKY_PLUGIN_LOG_DIR, f"{bname}-{port}.log"), "ab")
+        proc = subprocess.Popen(cmd, stdout=log, stderr=log, env=env)
+        if slot == "primary":
+            self.server_proc, self.server_model, self.server_vad = proc, name, vad
+        else:
+            self.extra_proc, self.extra_model, self.extra_vad = proc, name, vad
         deadline = time.time() + 90  # model load takes a few seconds
         while time.time() < deadline:
-            if self.server_proc.poll() is not None:
+            if proc.poll() is not None:
                 return {"ok": False, "error": f"{bname} exited; see its log"}
             try:
-                with socket.create_connection((HOST, PORT), timeout=1):
+                with socket.create_connection((HOST, port), timeout=1):
                     return {"ok": True}
             except OSError:
                 await asyncio.sleep(0.25)
         return {"ok": False, "error": f"{bname} did not start in time"}
 
     async def stop_server(self) -> dict:
-        proc = self.server_proc
-        if proc and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-        self.server_proc = None
-        self.server_task = None
-        self.server_model = ""
+        """Stop both speech servers (a setting change is picked up on the next use)."""
+        self._stop_slot("primary")
+        self._stop_slot("extra")
         return {"ok": True}
+
+    def _stop_model_slot(self, name: str):
+        """Stop the speech server that runs `name`, if there is one."""
+        slot = self._slot_of(name)
+        if slot:
+            self._stop_slot(slot)
 
     # ---------- recording + transcription ----------
     async def start_recording(self) -> dict:
@@ -354,13 +448,22 @@ class Plugin:
             return {"ok": True, "ready_s": 0.0}
         if self.phase != "idle":
             return {"ok": False, "error": "busy"}
-        if not self._selected():
-            return {"ok": False, "error": "no model selected; download one and select it first"}
         # Ask the Steam interface which app is in front now (it answers while we record).
+        # The answer comes back as its own message, so give it a moment before choosing
+        # the model: the app's own model is only used if Steam named the app.
+        seen = (self.running_app or {}).get("t", 0)
         try:
             await decky.emit("query_app")
         except Exception:
             pass
+        for _ in range(10):
+            if (self.running_app or {}).get("t", 0) != seen:
+                break
+            await asyncio.sleep(0.02)
+        model = ubermoc_apps.model_for(self._app_override(), self._selected(), self._model_ok)
+        if not model:
+            return {"ok": False, "error": "no model selected; download one and select it first"}
+        self.rec_model = model
         tool = shutil.which("parecord") or shutil.which("pw-record")
         if not tool:
             return {"ok": False, "error": "no parecord/pw-record found"}
@@ -381,8 +484,10 @@ class Plugin:
         self.record_proc, self.record_path = proc, path
 
         # Load the model while the user talks, so it is ready when they stop.
+        # A model switch (an app with its own model) costs a reload: start_server
+        # restarts the server for self.rec_model.
         if not (self.server_proc and self.server_proc.poll() is None):
-            self.server_task = asyncio.ensure_future(Plugin.start_server(self))
+            self.server_task = asyncio.ensure_future(Plugin.start_server(self, self.rec_model))
 
         # Wait until the WAV file starts growing past its 44-byte header.
         while time.time() - t0 < 5:
@@ -401,13 +506,17 @@ class Plugin:
         return ubermoc_rumble.level_of(self._load_settings().get("rumble_level"))
 
     def _buzz(self, which: str):
-        """Feel that recording started / stopped (every controller that can rumble; can be turned off)."""
-        if self._load_settings().get("rumble") is False:
+        """Feel that recording started / stopped (every controller that can rumble). The app
+        running now can turn the buzz off for itself, set its own intensity, or follow Global."""
+        s = self._load_settings()
+        ov = self._app_override()
+        if not ubermoc_apps.rumble_for(ov, s.get("rumble")):
             return
+        level = ubermoc_apps.level_for(ov, self._rumble_level())
         if self.rumbler is None:
             self.rumbler = ubermoc_rumble.Rumbler()
         try:
-            self.rumbler.play(which, self._rumble_level())
+            self.rumbler.play(which, level)
         except Exception as e:  # noqa: BLE001 - a missing buzz must never break dictation
             decky.logger.warning(f"rumble failed: {e}")
 
@@ -450,6 +559,7 @@ class Plugin:
         finally:
             self.phase = "idle"
             self.by_activator = False
+            self._apply_activator()      # an app switch during the recording is picked up now
         if typed is not None:
             result = {**result, "typed": typed}
         # A quick accidental tap of the activator shouldn't erase the last text.
@@ -465,11 +575,11 @@ class Plugin:
             return {"ok": False, "error": "no audio captured"}
         t0 = time.time()
         try:
-            started = await (self.server_task or Plugin.start_server(self))
+            started = await (self.server_task or Plugin.start_server(self, self.rec_model))
             if not started.get("ok"):
                 return started
             t1 = time.time()
-            text = await asyncio.get_event_loop().run_in_executor(None, self._transcribe, path)
+            text = await asyncio.get_event_loop().run_in_executor(None, self._transcribe, path, self.rec_model)
         except Exception as e:  # noqa: BLE001
             decky.logger.error(f"transcribe failed: {e}")
             return {"ok": False, "error": str(e)}
@@ -482,10 +592,20 @@ class Plugin:
         return {"ok": True, "text": text, "wait_s": round(t1 - t0, 2), "transcribe_s": round(t2 - t1, 2)}
 
     async def get_state(self) -> dict:
-        """Polled by the panel: what the dictation is doing and what it last heard."""
+        """Polled by the panel: what the dictation is doing and what it last heard.
+        `model` is the model this dictation transcribes with (the running app's own model
+        if it has one); `loading_model` says the server for it is still coming up, which is
+        the delay an app with a different model costs. `loaded_models` names every model whose
+        server is up, so the panel can say which ones are ready to use with no waiting."""
         self.panel_seen = time.time()          # the panel is open: results are shown there, not typed
+        slot = self._slot_of(self.rec_model)
+        server_up = self._alive(self._slot_proc(slot)) if slot else False
         return {"phase": self.phase, "last": self.last_result,
-                "activator_held": bool(self.hub and self.hub.active)}
+                "activator_held": bool(self.hub and self.hub.active),
+                "model": self.rec_model,
+                "loading_model": bool(self.rec_model) and not server_up
+                                   and self.phase in ("recording", "transcribing", "typing"),
+                "loaded_models": self.loaded_models()}
 
     # ---------- typing the text ----------
     async def _deliver_text(self, text: str, force: bool = False) -> dict:
@@ -506,8 +626,9 @@ class Plugin:
         deadline = time.time() + 2.0
         while self.hub and tokens and self.hub.any_held(tokens) and time.time() < deadline:
             await asyncio.sleep(0.02)
-        speed = s.get("type_speed") if s.get("type_speed") in ubermoc_typing.TIMING else "normal"
+        speed = ubermoc_apps.speed_for(self._app_override(), s.get("type_speed"))
         delay, hold, settle_before, settle_after = ubermoc_typing.TIMING[speed]
+        method = ubermoc_apps.method_for(self._app_override(), s.get("type_method"))
         before, after, app_name = ubermoc_typing.actions_for(s, self._running_appid())
         notes = []
         pressed_before = pressed_after = None
@@ -521,7 +642,7 @@ class Plugin:
                 await asyncio.sleep(settle_before)      # give a chat box time to open
 
         result = None
-        if s.get("type_method") == "steam":
+        if method == "steam":
             if await Plugin._type_via_steam(self, cleaned):
                 result = {"status": "typed", "method": "steam", "typed": len(cleaned), "skipped": 0}
             else:
@@ -542,7 +663,7 @@ class Plugin:
             else:
                 pressed_after = ubermoc_typing.action_label(after)
         return {**result, "before": pressed_before, "after": pressed_after, "app": app_name,
-                "note": " ".join(notes)}
+                "speed": speed, "model": self.rec_model, "note": " ".join(notes)}
 
     def _get_presser(self):
         if self.keyboard is None:
@@ -643,10 +764,22 @@ class Plugin:
 
     # ---------- what is running, and per-application overrides ----------
     async def set_running_app(self, appid: str, name: str) -> bool:
-        """The panel's frontend reports the running Steam game / non-Steam app."""
+        """The panel's frontend reports the running Steam game / non-Steam app. When the app
+        changes, the activator that applies to it is armed (its own, or the global one)."""
         appid = str(appid or "")
-        self.running_app = {"appid": appid if appid.isdigit() and appid != "0" else "",
-                            "name": str(name or ""), "t": time.time()}
+        new = {"appid": appid if appid.isdigit() and appid != "0" else "",
+               "name": str(name or ""), "t": time.time()}
+        changed = not self.running_app or self.running_app["appid"] != new["appid"]
+        self.running_app = new
+        if changed:
+            self._apply_activator()
+            s = self._load_settings()
+            if ubermoc_apps.flag_of(s.get("keep_loaded")):
+                # "Keep both models loaded": bring this app's model up now so the first dictation
+                # in the app is instant, not after a model load
+                model = ubermoc_apps.model_for(self._app_override(), self._selected(), self._model_ok)
+                if model and not self._slot_of(model):
+                    asyncio.ensure_future(self.start_server(model))
         return True
 
     def _running_appid(self) -> str:
@@ -658,18 +791,58 @@ class Plugin:
                 "warnings": ubermoc_typing.action_warnings(action)}
 
     async def get_overrides(self) -> dict:
-        overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
+        """The override list the panel reads, plus the global values it needs to show
+        "Global" (the global activator's label, speed, model, typing method, spoken symbols,
+        rumble and voice detector), the hidden applications and the models that are loaded now."""
+        s = self._load_settings()
+        overrides = ubermoc_typing.normalize_overrides(s.get("overrides"))
         running = self._running_appid()
-        glob_symbols = "symbols" if self._load_settings().get("type_symbols") == "symbols" else "words"
+        glob_symbols = "symbols" if s.get("type_symbols") == "symbols" else "words"
+        glob_act = ubermoc_apps.activator_for(None, s.get("activator"))
+        glob_model = self._selected()
+        hidden = ubermoc_apps.normalize_hidden(s.get("hidden"))
+        loaded = self.loaded_models()
+        model = ubermoc_apps.model_for(overrides.get(running), glob_model, self._model_ok)
         return {
             "overrides": [
                 {"appid": appid, "name": ov["name"], "kind": ov["kind"],
                  "before": self._action_info(ov["before"]), "after": self._action_info(ov["after"]),
-                 "symbols": ov.get("symbols") or glob_symbols}
+                 "symbols": ov.get("symbols") or glob_symbols,
+                 "activator": ov.get("activator") or [],
+                 "activator_label": ubermoc_input.describe(ov["activator"]) if ov.get("activator") else "",
+                 "activator_warnings": ubermoc_input.warnings_for(ov["activator"]) if ov.get("activator") else [],
+                 "model": ov.get("model") or "",
+                 "model_installed": bool(self._model_ok(ov["model"])) if ov.get("model") else False,
+                 "model_loaded": bool(self._slot_of(ov["model"])) if ov.get("model") else False,
+                 "speed": ov.get("speed") or "",
+                 "method": ov.get("method") or "",
+                 # null means "follow the Global option" (a stored bool / int is kept as is)
+                 "rumble": ov.get("rumble") if isinstance(ov.get("rumble"), bool) else None,
+                 "rumble_level": ov.get("rumble_level") if isinstance(ov.get("rumble_level"), int) else None,
+                 "vad": ov.get("vad") if isinstance(ov.get("vad"), bool) else None,
+                 "hidden": appid in hidden}
                 for appid, ov in sorted(overrides.items(), key=lambda kv: kv[1]["name"].lower())
             ],
+            "global": {"activator_label": ubermoc_input.describe(glob_act),
+                       "speed": ubermoc_apps.speed_for(None, s.get("type_speed")),
+                       "model": glob_model,
+                       "symbols": glob_symbols,
+                       "method": ubermoc_apps.method_for(None, s.get("type_method")),
+                       "rumble": ubermoc_apps.rumble_for(None, s.get("rumble")),
+                       "rumble_level": ubermoc_apps.level_for(None, ubermoc_rumble.level_of(s.get("rumble_level"))),
+                       "vad": self._vad_on(glob_model, None),
+                       "vad_supported": ubermoc_models.vad_supported(glob_model)},
             "running": {"appid": running, "name": (self.running_app or {}).get("name", "") if running else "",
                         "has_override": running in overrides},
+            # the model the running app dictates with, whether it is the global one, and whether
+            # its server is up, so the panel can say when a dictation in this app has to wait
+            "model": model,
+            "model_is_global": model == glob_model,
+            "model_loaded": bool(self._slot_of(model)),
+            "hidden": [appid for appid in sorted(hidden)],
+            "show_hidden": ubermoc_apps.flag_of(s.get("show_hidden")),
+            "keep_loaded": ubermoc_apps.flag_of(s.get("keep_loaded")),
+            "loaded_models": loaded,
         }
 
     async def add_override(self, appid: str, name: str, kind: str) -> dict:
@@ -694,6 +867,67 @@ class Plugin:
             overrides[str(appid)]["symbols"] = "symbols" if symbols == "symbols" else "words"
             self._save_settings(overrides=overrides)
         return await Plugin.get_overrides(self)
+
+    async def set_override_field(self, appid: str, field: str, value) -> dict:
+        """Give one app its own activator, model, typing speed, spoken symbols, typing method,
+        rumble on/off, rumble intensity or voice detector. An empty value means "follow the
+        Global options". Junk is dropped by the normalizer, never stored.
+        A model change stops the speech servers, so the next dictation loads the new model (it
+        loads while the user talks). A voice detector change stops the server that model runs on,
+        because the detector is fixed when the server starts. A new combination is armed straight
+        away when that app is running."""
+        overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
+        appid = str(appid)
+        r = await Plugin.get_overrides(self)
+        if appid not in overrides:
+            return {**r, "ok": False, "error": "no override for that app"}
+        if field not in ubermoc_apps.FIELDS:
+            return {**r, "ok": False, "error": f"cannot change {field}"}
+        model_used = overrides[appid].get("model") or self._selected()
+        self._save_settings(overrides=ubermoc_typing.normalize_overrides(
+            ubermoc_apps.set_field(overrides, appid, field, value)))
+        if field == "model":
+            await Plugin.stop_server(self)      # the next dictation loads it
+        elif field == "vad":
+            self._stop_model_slot(model_used)   # the detector is chosen when the server starts
+        if field == "activator" and appid == self._running_appid():
+            self._apply_activator()
+        return {**await Plugin.get_overrides(self), "ok": True}
+
+    async def set_app_hidden(self, appid: str, hidden: bool) -> dict:
+        """Hide one application from the Applications dropdown, or show it again.
+
+        Hiding is a panel preference only: the app's override keeps applying when that app runs.
+        A hidden app is reachable through the Hidden applications dropdown (under the Show hidden
+        switch), where it can be edited and unhidden."""
+        s = self._load_settings()
+        stored = ubermoc_apps.normalize_hidden(s.get("hidden"))
+        appid = str(appid)
+        if not appid.isdigit():
+            return {**await Plugin.get_overrides(self), "ok": False, "error": "no such application"}
+        if hidden:
+            if appid not in stored and len(stored) >= ubermoc_typing.MAX_OVERRIDES:
+                return {**await Plugin.get_overrides(self), "ok": False,
+                        "error": f"{ubermoc_typing.MAX_OVERRIDES} applications can be hidden"}
+            stored[appid] = True
+        else:
+            stored.pop(appid, None)
+        self._save_settings(hidden=stored)
+        return {**await Plugin.get_overrides(self), "ok": True}
+
+    async def set_show_hidden(self, on: bool) -> dict:
+        """Show or hide the Hidden applications dropdown at the bottom of the group."""
+        self._save_settings(show_hidden=bool(on))
+        return {**await Plugin.get_overrides(self), "ok": True}
+
+    async def set_keep_loaded(self, on: bool) -> dict:
+        """Keep the global model and an app's own model loaded at the same time, so switching
+        between them is instant. Turning it off frees the second server straight away; turning it
+        on starts nothing by itself - the second model is loaded the first time an app uses it."""
+        self._save_settings(keep_loaded=bool(on))
+        if not on:
+            self._stop_slot("extra")
+        return {**await Plugin.get_overrides(self), "ok": True}
 
     async def remove_override(self, appid: str) -> dict:
         overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
@@ -726,7 +960,12 @@ class Plugin:
 
     async def start_key_capture(self, which: str, appid: str = "") -> dict:
         """Listen for what the user holds together and then lets go of: a keyboard,
-        a mouse or a controller, exactly like recording the activator."""
+        a mouse or a controller, exactly like recording the activator.
+
+        `which` can be "activator" with an appid: the panel records an application's own
+        activator through this route, and it is saved on that app's override."""
+        if which == "activator":
+            return await Plugin.start_capture(self, appid)
         if which not in ("before", "after") or not self.hub:
             return {"ok": False, "error": "input is not available"}
         appid = str(appid or "")
@@ -811,22 +1050,36 @@ class Plugin:
             self.hub.set_ui_held(tokens)
         return True
 
-    async def start_capture(self) -> dict:
-        """Listen for the next combination the user holds and releases."""
+    async def start_capture(self, appid: str = "") -> dict:
+        """Listen for the next combination the user holds and releases. With an appid it
+        becomes that application's own activator (`purpose` tells the panel which one)."""
         if not self.hub:
             return {"ok": False, "error": "input is not available"}
-        self.hub.begin_capture(timeout=15.0, on_done=lambda toks: Plugin._captured(self, toks))
+        appid = str(appid or "")
+        self.hub.begin_capture(
+            timeout=15.0, purpose="activator" if not appid else f"activator@{appid}",
+            on_done=lambda toks, a=appid: Plugin._captured(self, toks, a))
         return {"ok": True}
 
-    def _captured(self, tokens: list):
-        if tokens:
-            self._save_settings(activator=tokens)
-            self.hub.set_activator(tokens)
+    def _captured(self, tokens: list, appid: str = ""):
+        if not tokens:
+            return
+        if appid:
+            overrides = ubermoc_typing.normalize_overrides(self._load_settings().get("overrides"))
+            if str(appid) in overrides:
+                overrides[str(appid)]["activator"] = ubermoc_input.valid_tokens(tokens)
+                self._save_settings(overrides=ubermoc_typing.normalize_overrides(overrides))
+                if str(appid) == self._running_appid():
+                    self._apply_activator()      # this app is running: arm its own combination
+            return
+        self._save_settings(activator=tokens)
+        self._apply_activator()
 
     async def capture_status(self) -> dict:
         st = self.hub.capture_status() if self.hub else {"state": "idle", "tokens": [], "label": ""}
         st["warnings"] = (ubermoc_input.warnings_for(st["tokens"])
-                          if st["state"] == "done" and st.get("purpose") == "activator" else [])
+                          if st["state"] == "done" and str(st.get("purpose", "")).startswith("activator")
+                          else [])
         return st
 
     async def cancel_capture(self) -> bool:
@@ -836,8 +1089,7 @@ class Plugin:
 
     async def clear_activator(self) -> dict:
         self._save_settings(activator=[])
-        if self.hub:
-            self.hub.set_activator([])
+        self._apply_activator()   # an app that is running with its own activator stays armed
         return {"ok": True}
 
     def _transcribe(self, path: str, name: str = "") -> str:
@@ -854,7 +1106,7 @@ class Plugin:
                  f'filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n').encode()
         body += audio + f"\r\n--{boundary}--\r\n".encode()
         req = urllib.request.Request(
-            f"http://{HOST}:{PORT}{url_path}", data=body,
+            f"http://{HOST}:{self._port_for(name)}{url_path}", data=body,
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         )
         with urllib.request.urlopen(req, timeout=120) as r:
