@@ -8,6 +8,8 @@ Transcription is local, with two engines to choose from: [whisper.cpp](https://g
 It also has a **Voice test**: pick the models you want to compare, read 22 short phrases (each recorded
 automatically), and the plugin scores every model on your own voice and tells you which is best for you.
 
+At the top, under **Transcribe**, a **Main model (switch now)** drop-down lists your downloaded models, so you can change the speech model at any moment, in a game too, without opening Global options (it changes the same Main model; an app set to use the Secondary model keeps using that one).
+
 The panel opens as five collapsible groups (one open at a time), with the update
 section always visible at the bottom, followed by **Downloads: more Uber apps for game mode** (a list of Uber Watch, Uber Watch for the desktop and the Ubermoc Warcraft Mod Updater, each opening its GitHub page):
 - **Global options**: six drop-downs in the same format and wording as the per-application ones, one open at a time, each showing its current choice when closed: **Models** (what is loaded now in grey, the Main model, a Secondary model, and the Keep both models loaded switch; the secondary model is chosen only here), **Activator**, **Typing** (speed, method, spoken symbols), **Press keys around the text**, **Rumble** (on or off, intensity 1 to 10) and **Voice detector**

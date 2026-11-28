@@ -1400,6 +1400,18 @@ function Panel() {
             {phase === "typing" && "Typing..."}
           </ButtonItem>
         </PanelSectionRow>
+        {downloaded.length > 1 && (
+          <PanelSectionRow>
+            <DropdownItem
+              label="Main model (switch now)"
+              description="Change the speech model without leaving the game or opening Global options. The first dictation after a switch waits while it loads. An app set to use the Secondary model keeps using that one."
+              rgOptions={downloaded.map((m) => ({ data: m.name, label: m.name }))}
+              selectedOption={ready ? active : undefined}
+              strDefaultLabel="Select a model"
+              onChange={(o) => useModel(o.data as string)}
+            />
+          </PanelSectionRow>
+        )}
         {(dict.model || dict.loading_model) && (
           <PanelSectionRow>
             <Field
